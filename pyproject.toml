@@ -138,6 +138,19 @@ xsquare_turtle2 = [
     "imageio[ffmpeg]",
     "pynput"
 ]
+piper = [
+    "pyyaml",
+    "rospkg",
+    "empy==3.3.4",
+    "gymnasium==0.29.1",
+    "pyrealsense2",
+    "pyquaternion",
+    "opencv-python",
+    "defusedxml",
+    "imageio[ffmpeg]",
+    "pynput",
+    "catkin_pkg"
+]
 
 [tool.uv]
 prerelease = "allow"
@@ -147,7 +160,8 @@ conflicts = [
       { extra = "agentic-vllm" },
       { extra = "embodied" },
       { extra = "franka" },
-      { extra = "xsquare_turtle2" }
+      { extra = "xsquare_turtle2" },
+      { extra = "piper" }
     ],
 ]
 override-dependencies = [

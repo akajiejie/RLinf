@@ -19,9 +19,10 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base-image-embodied-wan
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base-image-embodied-liberopro
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base-image-embodied-liberoplus
 
+
 # Franka depends on ros-noetic, which is not available on Ubuntu 22.04
 FROM ubuntu:20.04 AS base-image-embodied-franka
-
+FROM ubuntu:20.04 AS base-image-embodied-piper
 
 ##################################################################################################
 # Select base image according to BUILD_TARGET
@@ -252,6 +253,9 @@ RUN for v in 0.10.0 0.13.3 0.14.1 0.15.0 0.18.0; do \
             LIBFRANKA_VERSION="$v" FRANKA_ROS_VERSION=0.10.0 bash requirements/install.sh embodied --venv "franka-$v" --env franka; \
         done
 
+# Install Piper environment (shares ROS Noetic with Franka)
+RUN bash requirements/install.sh embodied --venv "piper" --env piper --model openpi
+
 # Set default env (recommended libfranka 0.15.0)
 RUN echo "source ${UV_PATH}/franka-0.15.0/bin/activate" >> ~/.bashrc
 
@@ -327,6 +331,17 @@ RUN bash requirements/install.sh embodied --venv openvla-oft --model openvla-oft
 
 # Set default env
 RUN echo "source ${UV_PATH}/openvla-oft/bin/activate" >> ~/.bashrc
+
+##################################################################################################
+# Embodied: Piper (Ubuntu 20.04, ROS Noetic)
+##################################################################################################
+FROM embodied-common-image AS embodied-piper-image
+
+# Install Piper environment with OpenPI model support
+RUN bash requirements/install.sh embodied --venv "piper" --env piper --model openpi
+
+# Set default env
+RUN echo "source ${UV_PATH}/piper/bin/activate" >> ~/.bashrc
 
 ##################################################################################################
 # Final image selection
