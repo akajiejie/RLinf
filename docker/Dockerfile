@@ -19,10 +19,10 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base-image-embodied-wan
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base-image-embodied-liberopro
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS base-image-embodied-liberoplus
 
-
 # Franka depends on ros-noetic, which is not available on Ubuntu 22.04
 FROM ubuntu:20.04 AS base-image-embodied-franka
-FROM ubuntu:20.04 AS base-image-embodied-piper
+# Piper ROS Base: Ubuntu 20.04 + CUDA + ROS Noetic + OpenPI (for piper_ros development)
+FROM docker.1ms.run/nvidia/cuda:12.4.1-cudnn-devel-ubuntu20.04 AS base-image-embodied-piper-rosbase
 
 ##################################################################################################
 # Select base image according to BUILD_TARGET
@@ -254,7 +254,7 @@ RUN for v in 0.10.0 0.13.3 0.14.1 0.15.0 0.18.0; do \
         done
 
 # Install Piper environment (shares ROS Noetic with Franka)
-RUN bash requirements/install.sh embodied --venv "piper" --env piper --model openpi
+RUN bash requirements/install.sh embodied --venv "piper" --env piper-rosbase --model openpi
 
 # Set default env (recommended libfranka 0.15.0)
 RUN echo "source ${UV_PATH}/franka-0.15.0/bin/activate" >> ~/.bashrc
@@ -338,7 +338,51 @@ RUN echo "source ${UV_PATH}/openvla-oft/bin/activate" >> ~/.bashrc
 FROM embodied-common-image AS embodied-piper-image
 
 # Install Piper environment with OpenPI model support
-RUN bash requirements/install.sh embodied --venv "piper" --env piper --model openpi
+RUN bash requirements/install.sh embodied --venv "piper" --env piper-rosbase --model openpi
+
+# Set default env
+RUN echo "source ${UV_PATH}/piper/bin/activate" >> ~/.bashrc
+
+##################################################################################################
+# Embodied: Piper ROS Base (Ubuntu 20.04, CUDA, ROS Noetic, OpenPI model)
+# Development environment for Piper robot arm with OpenPI model
+# - OpenPI model with GPU support
+# - ROS Noetic installed (piper_ros NOT compiled, user compiles manually)
+# - Use `source switch_env piper` to activate
+#
+# Build command:
+#   docker build --network host \
+#       --build-arg HTTP_PROXY=http://127.0.0.1:7890 \
+#       --build-arg HTTPS_PROXY=http://127.0.0.1:7890 \
+#       --build-arg BUILD_TARGET=embodied-piper-rosbase \
+#       -t rlinf:piper-rosbase -f docker/Dockerfile .
+##################################################################################################
+FROM embodied-common-image AS embodied-piper-rosbase-image
+
+# Proxy arguments for network acceleration
+ARG HTTP_PROXY=""
+ARG HTTPS_PROXY=""
+
+# Configure git and install with proxy acceleration
+# - git http.proxy: for git clone HTTPS operations
+# - http_proxy/https_proxy: for uv and other tools
+# - HTTPS_PROXY (uppercase): for Python urllib
+# - UV_DEFAULT_INDEX: Use Aliyun PyPI mirror for faster package downloads
+# Note: When proxy is available, we use proxy for GitHub, mirror for PyPI
+RUN if [ -n "${HTTP_PROXY}" ]; then \
+        git config --global http.proxy "${HTTP_PROXY}"; \
+        git config --global https.proxy "${HTTPS_PROXY}"; \
+    fi && \
+    export http_proxy="${HTTP_PROXY}" && \
+    export https_proxy="${HTTPS_PROXY}" && \
+    export HTTP_PROXY="${HTTP_PROXY}" && \
+    export HTTPS_PROXY="${HTTPS_PROXY}" && \
+    export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple && \
+    git config --global http.postBuffer 524288000 && \
+    git config --global http.lowSpeedLimit 0 && \
+    git config --global http.lowSpeedTime 999999 && \
+    git config --global submodule.recurse true && \
+    bash requirements/install.sh embodied --venv "piper" --env piper-rosbase --model openpi
 
 # Set default env
 RUN echo "source ${UV_PATH}/piper/bin/activate" >> ~/.bashrc

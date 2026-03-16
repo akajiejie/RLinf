@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# Configure ROS apt source for the current Ubuntu version using USTC mirror.
+# Configure ROS Noetic apt source for Piper (Ubuntu 20.04)
+# This is a lightweight ROS installation without franka dependencies
+
+set -e
 
 # Check if apt is available
 if ! command -v apt-get &> /dev/null; then
@@ -55,6 +58,13 @@ if [ -z "$ubuntu_codename" ]; then
     exit 1
 fi
 
+# ROS Noetic only supports Ubuntu 20.04 (Focal)
+if [ "$ubuntu_codename" != "focal" ]; then
+    echo "ROS Noetic is officially supported only on Ubuntu 20.04 (Focal)." >&2
+    echo "Current Ubuntu codename: $ubuntu_codename" >&2
+    exit 1
+fi
+
 ros_mirror="http://mirrors.ustc.edu.cn/ros/ubuntu"
 test_url="${ros_mirror}/dists/${ubuntu_codename}/"
 
@@ -62,7 +72,6 @@ test_url="${ros_mirror}/dists/${ubuntu_codename}/"
 if ! curl -fsSL --head "$test_url" >/dev/null 2>&1; then
     echo "ROS Noetic mirror $ros_mirror does not appear to provide packages for Ubuntu codename '$ubuntu_codename'." >&2
     echo "Tested URL: $test_url" >&2
-    echo "Please make sure you are running Ubuntu version 20.04 or below." >&2
     exit 1
 fi
 
@@ -79,7 +88,7 @@ fi
 # Add ROS GPG key
 sudo apt-key adv --keyserver 'hkp://keyserver.ubuntu.com:80' --recv-key C1CF6E31E6BADE8868B172B4F42ED6FBAB17C654
 
-# Install ROS Noetic packages
+# Install ROS Noetic base packages
 sudo apt update -y
 sudo apt install -y --no-install-recommends ros-noetic-ros-base || {
     echo "Failed to install ROS Noetic packages. Please check your apt sources or install manually." >&2
@@ -87,45 +96,44 @@ sudo apt install -y --no-install-recommends ros-noetic-ros-base || {
 }
 
 # Install python3-empy which is required by catkin for template processing
-# This is needed when building ROS packages with catkin_make
 sudo apt install -y --no-install-recommends python3-empy
 
+# Install additional ROS packages commonly needed for piper_ros
+sudo apt install -y --no-install-recommends \
+    ros-noetic-tf \
+    ros-noetic-tf2-ros \
+    ros-noetic-urdf \
+    ros-noetic-xacro \
+    ros-noetic-robot-state-publisher \
+    ros-noetic-joint-state-publisher \
+    ros-noetic-joint-state-publisher-gui \
+    ros-noetic-rviz \
+    ros-noetic-controller-manager \
+    ros-noetic-ros-control \
+    ros-noetic-ros-controllers \
+    ros-noetic-hardware-interface \
+    ros-noetic-transmission-interface \
+    ros-noetic-control-toolbox \
+    ros-noetic-realtime-tools \
+    ros-noetic-actionlib \
+    ros-noetic-geometry-msgs \
+    ros-noetic-sensor-msgs \
+    ros-noetic-std-msgs \
+    ros-noetic-trajectory-msgs \
+    ros-noetic-control-msgs || {
+    echo "Warning: Some optional ROS packages failed to install. Continuing..." >&2
+}
+
 # Fix CMake version requirement in ROS catkin toplevel.cmake
-# Current CMake no longer supports versions < 3.5, need to update 3.0.2 to 3.5
 if [ -f /opt/ros/noetic/share/catkin/cmake/toplevel.cmake ]; then
     echo "Fixing CMake version requirement in ROS catkin toplevel.cmake..."
     sudo sed -i 's/cmake_minimum_required(VERSION 3\.0\.2)/cmake_minimum_required(VERSION 3.5)/' /opt/ros/noetic/share/catkin/cmake/toplevel.cmake
 fi
 
-# Install libfranka and franka_ros dependencies
-# Ensure Ubuntu is 20.04 (Focal) for libfranka compatibility
-if [ "$ubuntu_codename" != "focal" ]; then
-    echo "libfranka is officially supported only on Ubuntu 20.04 (Focal)." >&2
-    exit 1
-fi
-
-# libfranka dependencies
-sudo apt-get install -y libpoco-dev libeigen3-dev libfmt-dev libhidapi-dev
-sudo apt-get install -y lsb-release curl
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL http://robotpkg.openrobots.org/packages/debian/robotpkg.asc | sudo tee /etc/apt/keyrings/robotpkg.asc
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/robotpkg.asc] http://robotpkg.openrobots.org/packages/debian/pub $ubuntu_codename robotpkg" | sudo tee /etc/apt/sources.list.d/robotpkg.list
-sudo apt-get update
-sudo apt-get install -y robotpkg-simde=0.8.0 
-sudo apt-get install -y robotpkg-casadi=3.6.7
-sudo apt-get install -y robotpkg-pinocchio
-
-# franka_ros dependencies
-sudo apt-get install -y --no-install-recommends \
-    ros-noetic-boost-sml \
-    ros-noetic-ros-control \
-    ros-noetic-eigen-conversions \
-    ros-noetic-gazebo-dev \
-    ros-noetic-gazebo-ros-control \
-    ros-noetic-urdfdom-py \
-    ros-noetic-tf-conversions \
-    ros-noetic-kdl-parser \
-    ros-noetic-xacro \
-    ros-noetic-robot-state-publisher \
-    ros-noetic-joint-state-publisher
-
+echo ""
+echo "=========================================="
+echo "ROS Noetic installation complete!"
+echo "=========================================="
+echo ""
+echo "To use ROS, run: source /opt/ros/noetic/setup.bash"
+echo ""

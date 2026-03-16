@@ -18,7 +18,7 @@ NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "dexbotic" "lingbotvla")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "frankasim" "robotwin" "habitat" "opensora" "wan" "xsquare_turtle2" "liberopro" "liberoplus" "piper")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "frankasim" "robotwin" "habitat" "opensora" "wan" "xsquare_turtle2" "liberopro" "liberoplus" "piper-rosbase")
 
 #=======================Utility Functions=======================
 
@@ -149,8 +149,10 @@ setup_mirror() {
         export UV_PYTHON_INSTALL_MIRROR=https://ghfast.top/https://github.com/astral-sh/python-build-standalone/releases/download
         export UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple
         export HF_ENDPOINT=https://hf-mirror.com
+        # GITHUB_PREFIX 用于 uv pip install git+ 命令（uv 不读取 git config）
         export GITHUB_PREFIX="https://ghfast.top/"
-        git config --global url."${GITHUB_PREFIX}github.com/".insteadOf "https://github.com/"
+        # Git 配置：用于 git clone 和子模块（系统 git 命令）
+        git config --global url."https://ghfast.top/https://github.com/".insteadOf "https://github.com/"
     fi
 }
 
@@ -159,7 +161,9 @@ unset_mirror() {
         unset UV_PYTHON_INSTALL_MIRROR
         unset UV_DEFAULT_INDEX
         unset HF_ENDPOINT
-        git config --global --unset url."${GITHUB_PREFIX}github.com/".insteadOf
+        # 注意: 这里的 URL 必须与 setup_mirror 中设置的完全一致
+        # 使用 || true 避免配置项不存在时脚本退出
+        git config --global --unset url."https://ghfast.top/https://github.com/".insteadOf || true
     fi
 }
 
@@ -501,12 +505,18 @@ install_openpi_model() {
             install_flash_attn
             uv pip install numpydantic==1.7.0 pydantic==2.11.7 numpy==1.26.0
             ;;
-        piper)
+        piper-rosbase)
+            # Piper ROS Base: OpenPI model + ROS Noetic for real Piper robot arm
+            # No ManiSkill/Libero simulation assets needed
             create_and_sync_venv
             install_common_embodied_deps
             uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
-            install_piper_env  # 调用 Piper 环境安装
+            # 安装 ROS Noetic
+            if [ "$NO_ROOT" -eq 0 ]; then
+                bash $SCRIPT_DIR/embodied/ros_piper_install.sh
+            fi
+            install_piper_rosbase_env
             ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
@@ -606,15 +616,6 @@ install_env_only() {
     create_and_sync_venv
     SKIP_ROS=${SKIP_ROS:-0}
     case "$ENV_NAME" in
-        piper)
-            uv sync --extra piper --active $NO_INSTALL_RLINF_CMD
-            if [ "$SKIP_ROS" -ne 1 ]; then
-                if [ "$NO_ROOT" -eq 0 ]; then
-                    bash $SCRIPT_DIR/embodied/ros_install.sh
-                fi
-                install_piper_env
-            fi
-            ;;
         franka)
             uv sync --extra franka --active $NO_INSTALL_RLINF_CMD
             if [ "$SKIP_ROS" -ne 1 ]; then
@@ -877,36 +878,15 @@ install_habitat_env() {
     uv pip install -e $habitat_lab_dir/habitat-baselines
 }
 
-install_piper_env() {
-    # 启用 ROS Noetic 环境
-    set +euo pipefail
-    source /opt/ros/noetic/setup.bash
-    set -euo pipefail
+install_piper_rosbase_env() {
+    # Piper ROS Base: 安装 piper Python 依赖，ROS 环境变量
+    # piper_ros 不在此编译，用户在容器内手动编译
     
-    ROS_CATKIN_PATH=$(realpath "$VENV_DIR/piper_catkin_ws")
+    # 安装 Piper Python 依赖
+    uv pip install piper_sdk python-can rospkg catkin_pkg empy "setuptools<70"
     
-    mkdir -p "$ROS_CATKIN_PATH/src"
-    
-    # 使用脚本内置的 clone_or_reuse_repo 克隆 Piper 官方 ROS 仓库
-    local piper_dir
-    piper_dir=$(clone_or_reuse_repo PIPER_ROS_PATH "$ROS_CATKIN_PATH/src/piper_ros" https://github.com/agilexrobotics/piper_ros.git)
-    
-    # 安装 Piper 环境及 Python 通信所需的依赖
-    # piper_sdk: 官方提供的机械臂 SDK
-    # python-can: 硬件 CAN 控制所需
-    # mujoco: 提供的 piper_mujoco 仿真支持
-    # rospkg, catkin_pkg: 兼容 Python 虚拟环境调用 ROS Noetic 工具
-    uv pip install piper_sdk python-can mujoco rospkg catkin_pkg
-    
-    # 使用 catkin_make 进行编译
-    # piper_ros 内部打包了 MoveIt 的源码且包含了大量的 C++14/17 节点，统一设置 CXX_STANDARD
-    pushd "$ROS_CATKIN_PATH" >/dev/null
-    catkin_make -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=17
-    popd >/dev/null
-    
-    # 将环境变量注入到当前虚拟环境的 activate 脚本中，保证每次激活环境时都能找到 piper 环境
+    # 添加 ROS 环境变量
     echo "source /opt/ros/noetic/setup.bash" >> "$VENV_DIR/bin/activate"
-    echo "source $ROS_CATKIN_PATH/devel/setup.bash" >> "$VENV_DIR/bin/activate"
 }
 install_opensora_world_model() {
     # Clone opensora repository

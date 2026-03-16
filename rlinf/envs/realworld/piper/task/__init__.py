@@ -11,10 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 from gymnasium.envs.registration import register
-from .your_task_env import YourTaskEnv
+
+from rlinf.envs.realworld.piper.task.test_task_env import PiperTestTaskEnv
 
 register(
-    id="PiperYourTask-v1",
-    entry_point="rlinf.envs.realworld.piper.tasks:YourTaskEnv",
+    id="PiperTestTask-v1",
+    entry_point="rlinf.envs.realworld.piper.task:PiperTestTaskEnv",
 )
