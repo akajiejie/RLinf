@@ -124,16 +124,23 @@ class PiperController:
         """
         # ---- 话题名称定义 ----
         # 订阅：状态读取（piper_ctrl_single_node 发布的话题）
-        self._left_joint_state_topic = f"{self._ns_left}/joint_states_single"
-        self._right_joint_state_topic = f"{self._ns_right}/joint_states_single"
-        self._left_end_pose_topic = f"{self._ns_left}/end_pose"
-        self._right_end_pose_topic = f"{self._ns_right}/end_pose"
-
-        # 发布：控制指令（piper_ctrl_single_node 订阅的话题）
-        # 注意：launch 文件中 joint_ctrl_single 被 remap 到 /joint_states
-        # 在双臂场景下，各自命名空间下发布 joint_ctrl_single
-        self._left_joint_ctrl_topic = f"{self._ns_left}/joint_ctrl_single"
-        self._right_joint_ctrl_topic = f"{self._ns_right}/joint_ctrl_single"
+        # 适配 start_ms_piper.launch 的 topic 结构
+        if self._ns_left == "/puppet_left" and self._ns_right == "/puppet_right":
+            # 主从模式 (start_ms_piper.launch)
+            self._left_joint_state_topic = "/puppet/joint_left"
+            self._right_joint_state_topic = "/puppet/joint_right"
+            self._left_end_pose_topic = "/puppet/end_pose_left"
+            self._right_end_pose_topic = "/puppet/end_pose_right"
+            self._left_joint_ctrl_topic = "/master/joint_left"
+            self._right_joint_ctrl_topic = "/master/joint_right"
+        else:
+            # 单臂节点模式
+            self._left_joint_state_topic = f"{self._ns_left}/joint_states_single"
+            self._right_joint_state_topic = f"{self._ns_right}/joint_states_single"
+            self._left_end_pose_topic = f"{self._ns_left}/end_pose"
+            self._right_end_pose_topic = f"{self._ns_right}/end_pose"
+            self._left_joint_ctrl_topic = f"{self._ns_left}/joint_ctrl_single"
+            self._right_joint_ctrl_topic = f"{self._ns_right}/joint_ctrl_single"
 
         # ---- 订阅：左臂状态 ----
         self._ros.connect_ros_channel(
