@@ -11,17 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Pico VR 遥操作模块。"""
-
-from rlinf.envs.realworld.common.pico_vr.pico_dual_piper import (
-    DEFAULT_DUAL_PIPER_URDF_PATH,
-    DEFAULT_MANIPULATOR_CONFIG,
-    PicoDualPiperController,
-)
-
-__all__ = [
-    "PicoDualPiperController",
-    "DEFAULT_DUAL_PIPER_URDF_PATH",
-    "DEFAULT_MANIPULATOR_CONFIG",
-]
