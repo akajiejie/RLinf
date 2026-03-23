@@ -137,6 +137,12 @@ class PiperRobotConfig:
         ]
     )
 
+    # ---- 人在回路配置 ----
+    enable_human_intervention: bool = True
+    master_left_topic: str = "/master/joint_left"
+    master_right_topic: str = "/master/joint_right"
+    intervention_trigger_key: str = "page_down"
+
     # ---- ZMQ 推理服务（预留） ----
     inference_host: str = "127.0.0.1"
     inference_port: int = 8080
@@ -193,6 +199,19 @@ class PiperEnv(gym.Env):
         else:
             self._controller = None
 
+        # ---- 初始化主臂控制器（人在回路） ----
+        if not self.config.is_dummy and self.config.enable_human_intervention:
+            from rlinf.envs.realworld.common.controller.piper import MasterArmController
+
+            self._master_controller = MasterArmController(
+                master_left_topic=config.master_left_topic,
+                master_right_topic=config.master_right_topic,
+                enable_keyboard_trigger=True,
+                trigger_key=config.intervention_trigger_key,
+            )
+        else:
+            self._master_controller = None
+
         # ---- 图像缓存（ROS 回调线程安全写入） ----
         self._bridge = CvBridge()
         self._img_lock = threading.Lock()
@@ -227,9 +246,19 @@ class PiperEnv(gym.Env):
         if not ready:
             self._logger.warning("机械臂等待超时，部分话题可能未就绪。")
 
+        # ---- 等待主臂数据就绪（如果启用人在回路） ----
+        if self._master_controller is not None:
+            self._logger.info("等待主臂数据就绪...")
+            master_ready = self._master_controller.wait_for_master_data(timeout=10.0)
+            if not master_ready:
+                self._logger.warning(
+                    "主臂数据等待超时，人在回路功能可能不可用。"
+                )
+
         self._logger.info(
             f"PiperEnv 初始化完成: env_idx={env_idx}, "
-            f"cameras={config.camera_names}, freq={config.step_frequency}Hz"
+            f"cameras={config.camera_names}, freq={config.step_frequency}Hz, "
+            f"intervention={config.enable_human_intervention}"
         )
 
     # ==================================================================
@@ -349,6 +378,12 @@ class PiperEnv(gym.Env):
             self.action_space.low,
             self.action_space.high,
         )
+
+        # ---- 人在回路介入: 检查是否使用主臂控制 ----
+        if self._master_controller is not None:
+            if self._master_controller.get_intervention_state():
+                action = self._master_controller.blend_action(action)
+                self._logger.debug("人工介入模式: 使用主臂控制")
 
         # ---- 拆分为左右臂动作 ----
         left_action, right_action = split_dual_arm_action(action)
@@ -526,4 +561,11 @@ class PiperEnv(gym.Env):
             for sub in self._img_subscribers:
                 sub.unregister()
             self._img_subscribers = []
+        
+        # 清理主臂控制器资源
+        if self._master_controller is not None:
+            self._logger.info("关闭主臂控制器...")
+            # MasterArmController 中的线程是 daemon=True，会自动退出
+            self._master_controller = None
+        
         self._logger.info("PiperEnv 已关闭。")
