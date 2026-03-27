@@ -141,7 +141,8 @@ class PiperRobotConfig:
     enable_human_intervention: bool = True
     master_left_topic: str = "/master/joint_left"
     master_right_topic: str = "/master/joint_right"
-    intervention_trigger_key: str = "page_down"
+    intervention_trigger_key: str = "page_down"  # 切换遥操作介入
+    policy_enable_key: str = "page_up"  # 切换策略输出
 
     # ---- ZMQ 推理服务（预留） ----
     inference_host: str = "127.0.0.1"
@@ -208,6 +209,7 @@ class PiperEnv(gym.Env):
                 master_right_topic=config.master_right_topic,
                 enable_keyboard_trigger=True,
                 trigger_key=config.intervention_trigger_key,
+                policy_enable_key=config.policy_enable_key,
             )
         else:
             self._master_controller = None
@@ -379,11 +381,15 @@ class PiperEnv(gym.Env):
             self.action_space.high,
         )
 
-        # ---- 人在回路介入: 检查是否使用主臂控制 ----
+        # ---- 人在回路介入: 根据遥操作和策略状态混合动作 ----
         if self._master_controller is not None:
-            if self._master_controller.get_intervention_state():
-                action = self._master_controller.blend_action(action)
-                self._logger.debug("人工介入模式: 使用主臂控制")
+            # 获取当前从臂位置
+            current_qpos = self._controller.get_qpos()
+            # blend_action() 内部处理优先级：
+            # 1. 遥操作 ON -> current_qpos + master_delta
+            # 2. 策略 ON -> policy_action
+            # 3. 两者 OFF -> current_qpos (保持)
+            action = self._master_controller.blend_action(action, current_qpos)
 
         # ---- 拆分为左右臂动作 ----
         left_action, right_action = split_dual_arm_action(action)

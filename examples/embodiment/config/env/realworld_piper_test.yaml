@@ -1,0 +1,18 @@
+defaults:
+  - base_realworld
+
+name: piper
+type: PiperEnv
+config:
+  ns_left: "/puppet_left"
+  ns_right: "/puppet_right"
+  camera_names: ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+  img_topics: 
+    - "/camera_f/color/image_raw"
+    - "/camera_l/color/image_raw"
+    - "/camera_r/color/image_raw"
+  step_frequency: 30.0
+  max_num_steps: 10000
+  enable_human_intervention: true
+  master_left_topic: "/master/joint_left"
+  master_right_topic: "/master/joint_right"

@@ -17,8 +17,8 @@
 This script tests the master-slave arm intervention functionality:
 - PiperEnv initialization with MasterArmController
 - Reading master arm joint states (delta qpos mode)
-- Keyboard-triggered intervention mode switching (page_down key)
-- Action replacement: master arm pose vs policy output
+- Dual keyboard control: policy enable + teleoperation intervention
+- Action replacement logic with priority system
 - Data flow validation: qpos/qvel/effort/frames
 
 Prerequisites:
@@ -30,24 +30,36 @@ Usage:
     python test_piper_interrupt.py
 
 Controls:
-    page_down  - Toggle intervention mode (human control <-> policy control)
-    q          - Quit
-    r          - Reset environment
-    p          - Pause/Resume
+    page_down  - Toggle teleoperation (遥操作 on/off)
+    page_up    - Toggle policy output (策略输出 on/off)
+    Ctrl+C     - Quit
+
+Control Priority (highest to lowest):
+    1. Teleoperation ON + master data ready: action = current_qpos + master_delta
+    2. Policy ON: action = policy_action (sinusoidal motion)
+    3. Both OFF: action = current_qpos (hold position, no movement)
 
 Test Flow:
     1. Initialize PiperEnv with intervention enabled
     2. Reset environment
     3. Loop:
        - Generate policy action (small sinusoidal motion at 1Hz)
-       - Check intervention state
-       - If intervention mode: use master arm pose
-       - If policy mode: use generated policy action
+       - Check intervention & policy state
+       - Blend action based on priority
        - Step environment
-       - Display status (qpos, intervention state, master arm data)
+       - Display status (qpos, mode states, action source)
+
+State Matrix:
+    | Policy | Teleoperation | Result                                    |
+    |--------|---------------|-------------------------------------------|
+    | ON     | OFF           | Sinusoidal motion (policy)                |
+    | OFF    | OFF           | Hold position (no movement)               |
+    | ON     | ON            | Human control (policy blocked)            |
+    | OFF    | ON            | Human control                             |
 """
 
 import os
+import signal
 import sys
 import time
 from datetime import datetime
@@ -57,7 +69,26 @@ import numpy as np
 # Add RLinf to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+# Add piper_ros devel Python packages to path
+piper_ros_python_path = "/workspace/code/piper_ros/devel/lib/python3/dist-packages"
+if os.path.exists(piper_ros_python_path) and piper_ros_python_path not in sys.path:
+    sys.path.insert(0, piper_ros_python_path)
+
 from rlinf.envs.realworld.piper import PiperEnv, PiperRobotConfig
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle Ctrl+C signal for graceful shutdown."""
+    global shutdown_requested
+    print("\n\n[SIGNAL] Ctrl+C detected, initiating graceful shutdown...")
+    shutdown_requested = True
+
+
+# Register signal handler
+signal.signal(signal.SIGINT, signal_handler)
 
 
 def print_separator(char="=", length=80):
@@ -72,26 +103,35 @@ def print_header(title):
     print_separator()
 
 
-def print_status(step, intervention_enabled, master_ready, qpos, action_source):
+def print_status(step, intervention_enabled, policy_enabled, master_ready, qpos, action_source, master_delta=None):
     """Print current status information.
     
     Args:
         step: Current step number.
-        intervention_enabled: Whether intervention mode is enabled.
+        intervention_enabled: Whether teleoperation intervention is enabled.
+        policy_enabled: Whether policy output is enabled.
         master_ready: Whether master arm data is ready.
         qpos: Current joint positions (14D).
-        action_source: Source of action ('master' or 'policy').
+        action_source: Source of action.
+        master_delta: Master arm delta values (14D), optional.
     """
     timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     
     print(f"\n[{timestamp}] Step {step:04d}")
-    print(f"  Mode: {'[INTERVENTION]' if intervention_enabled else '[POLICY]':20s} | Action Source: {action_source}")
+    print(f"  Teleoperation: {'ON ' if intervention_enabled else 'OFF'} | "
+          f"Policy: {'ON ' if policy_enabled else 'OFF'} | "
+          f"Action: {action_source}")
     print(f"  Master Data Ready: {master_ready}")
     
     # Print joint positions (left arm)
     print(f"  Left  Arm qpos: {qpos[:7]}")
     # Print joint positions (right arm)
     print(f"  Right Arm qpos: {qpos[7:14]}")
+    
+    # Print master delta if in intervention mode
+    if master_delta is not None and intervention_enabled:
+        print(f"  Master Delta (L): {master_delta[:7]}")
+        print(f"  Master Delta (R): {master_delta[7:14]}")
 
 
 def generate_policy_action(step, base_qpos, amplitude=0.05, frequency=1.0):
@@ -220,16 +260,25 @@ def main():
     
     # Instructions
     print_header("Test Instructions")
-    print("  1. The robot will execute small sinusoidal motions (1Hz) in POLICY mode")
-    print("  2. Press [page_down] to switch to INTERVENTION mode")
-    print("  3. In INTERVENTION mode, move the master arms to control the slave arms")
-    print("  4. Press [page_down] again to switch back to POLICY mode")
-    print("  5. Press [q] + [Enter] to quit")
-    print("  6. Press [r] + [Enter] to reset")
-    print("  7. Press [p] + [Enter] to pause/resume")
+    print("  Initial State: Policy=ON, Teleoperation=OFF")
+    print("  Robot executes sinusoidal motions (1Hz) from policy")
+    print()
+    print("  Keyboard Controls:")
+    print("    [page_up]   - Toggle policy output (ON/OFF)")
+    print("                  OFF: robot holds position, policy blocked")
+    print("    [page_down] - Toggle teleoperation (ON/OFF)")
+    print("                  ON: human controls via master arms (overrides policy)")
+    print("    [Ctrl+C]    - Quit program")
+    print()
+    print("  Control Matrix:")
+    print("    Policy=ON,  Teleoperation=OFF  -> Sinusoidal motion (policy)")
+    print("    Policy=OFF, Teleoperation=OFF  -> Hold position (no movement)")
+    print("    Policy=ON,  Teleoperation=ON   -> Human control (policy blocked)")
+    print("    Policy=OFF, Teleoperation=ON   -> Human control")
     print_separator()
     
-    input("\nPress Enter to start the test...")
+    print("\nStarting test in 3 seconds...")
+    time.sleep(3)
     
     # Test loop
     step = 0
@@ -240,12 +289,8 @@ def main():
     print("=" * 80)
     
     try:
-        while True:
+        while not shutdown_requested:
             loop_start_time = time.time()
-            
-            # Check for user input (non-blocking)
-            # Note: This is a simplified version. In practice, you might want to use
-            # a separate thread for keyboard input
             
             # Generate policy action (small sinusoidal motion at 1Hz)
             policy_action = generate_policy_action(
@@ -256,30 +301,34 @@ def main():
             )
             
             # Step environment
-            # The env.step() will internally check intervention state
-            # and replace action if intervention is enabled
+            # The env.step() will internally check intervention & policy state
+            # and blend action based on priority system
             obs, reward, terminated, truncated, info = env.step(policy_action)
             
-            # Get intervention state
+            # Get intervention and policy state
             intervention_enabled = env._master_controller.get_intervention_state()
+            policy_enabled = env._master_controller.get_policy_enabled()
             master_ready = env._master_controller.is_master_data_ready()
             
-            # Determine action source
+            # Determine action source based on priority
             if intervention_enabled and master_ready:
-                action_source = "MASTER ARM"
+                action_source = "TELEOPERATION (master delta)"
+            elif policy_enabled:
+                action_source = "POLICY (sinusoidal)"
             else:
-                action_source = "POLICY"
+                action_source = "HOLD (current_qpos)"
             
             # Print status every 10 steps (to avoid flooding console)
             if step % 10 == 0:
                 qpos = obs['state']['qpos']
-                print_status(step, intervention_enabled, master_ready, qpos, action_source)
                 
-                # Print master arm positions if available
-                if master_ready:
-                    left_master, right_master = env._master_controller.get_master_action()
-                    print(f"  Master Left  qpos: {left_master}")
-                    print(f"  Master Right qpos: {right_master}")
+                # Get master delta if in intervention mode
+                master_delta = None
+                if intervention_enabled and master_ready:
+                    left_delta, right_delta = env._master_controller.get_master_action()
+                    master_delta = np.concatenate([left_delta, right_delta])
+                
+                print_status(step, intervention_enabled, policy_enabled, master_ready, qpos, action_source, master_delta)
             
             # Check for termination
             if terminated or truncated:
@@ -303,7 +352,7 @@ def main():
                 time.sleep(sleep_time)
             
     except KeyboardInterrupt:
-        print("\n\nTest interrupted by user (Ctrl+C)")
+        print("\n\n[EXCEPTION] Test interrupted by KeyboardInterrupt")
     except Exception as e:
         print(f"\n\nERROR during test: {e}")
         import traceback
@@ -319,8 +368,10 @@ def main():
         
         print_header("Test Summary")
         print(f"  Total steps executed: {step}")
-        print(f"  Final intervention state: {intervention_enabled if 'intervention_enabled' in locals() else 'Unknown'}")
-        print(f"  Master data ready: {master_ready if 'master_ready' in locals() else 'Unknown'}")
+        if 'intervention_enabled' in locals() and 'policy_enabled' in locals():
+            print(f"  Final teleoperation state: {intervention_enabled}")
+            print(f"  Final policy state: {policy_enabled}")
+            print(f"  Master data ready: {master_ready if 'master_ready' in locals() else 'Unknown'}")
         print_separator()
         print("\nTest completed.")
 

@@ -57,15 +57,18 @@ class MasterArmController:
         master_right_topic: str = "/master/joint_right",
         enable_keyboard_trigger: bool = True,
         trigger_key: str = "page_down",
+        policy_enable_key: str = "page_up",
     ) -> None:
         self._logger = get_logger()
         self._master_left_topic = master_left_topic
         self._master_right_topic = master_right_topic
         self._enable_keyboard = enable_keyboard_trigger
         self._trigger_key = trigger_key
+        self._policy_enable_key = policy_enable_key
 
         # ---- 介入状态 ----
         self._intervention_enabled: bool = False
+        self._policy_enabled: bool = True  # 策略输出默认开启
         self._state_lock = threading.Lock()
 
         # ---- 主臂关节位置缓存 (线程安全) ----
@@ -87,7 +90,9 @@ class MasterArmController:
             )
             self._keyboard_thread.start()
             self._logger.info(
-                f"MasterArmController: 键盘监听已启动, 按 '{self._trigger_key}' 切换介入模式"
+                f"MasterArmController: 键盘监听已启动\n"
+                f"  '{self._trigger_key}' - 切换遥操作介入\n"
+                f"  '{self._policy_enable_key}' - 切换策略输出"
             )
 
         self._logger.info(
@@ -202,7 +207,9 @@ class MasterArmController:
         """键盘监听线程。
 
         对齐 piper_start_ms_node_double_agilex_dyn_pos.py 第146-185行的键盘监听实现。
-        使用 pynput 库监听键盘事件,按 page_down 切换介入模式。
+        使用 pynput 库监听键盘事件:
+        - page_down: 切换遥操作介入模式
+        - page_up: 切换策略输出模式
         """
 
         def on_press(key):
@@ -215,11 +222,18 @@ class MasterArmController:
                     key_str = str(key).replace("Key.", "")
 
                 if key_str == self._trigger_key:
-                    # 切换介入状态
+                    # 切换遥操作介入状态
                     with self._state_lock:
                         self._intervention_enabled = not self._intervention_enabled
                         state_str = "ENABLED" if self._intervention_enabled else "DISABLED"
-                        self._logger.info(f"人工介入模式: {state_str}")
+                        self._logger.info(f"遥操作介入: {state_str}")
+                
+                elif key_str == self._policy_enable_key:
+                    # 切换策略输出状态
+                    with self._state_lock:
+                        self._policy_enabled = not self._policy_enabled
+                        state_str = "ENABLED" if self._policy_enabled else "DISABLED"
+                        self._logger.info(f"策略输出: {state_str}")
 
             except Exception as e:
                 self._logger.error(f"键盘按键处理异常: {e}")
@@ -242,7 +256,7 @@ class MasterArmController:
         """获取当前是否处于人工介入模式。
 
         Returns:
-            True 表示介入模式已启用,False 表示使用 RL 策略。
+            True 表示介入模式已启用,False 表示不使用遥操作。
         """
         with self._state_lock:
             return self._intervention_enabled
@@ -256,7 +270,27 @@ class MasterArmController:
         with self._state_lock:
             self._intervention_enabled = enabled
             state_str = "ENABLED" if enabled else "DISABLED"
-            self._logger.info(f"人工介入模式: {state_str}")
+            self._logger.info(f"遥操作介入: {state_str}")
+    
+    def get_policy_enabled(self) -> bool:
+        """获取当前策略输出是否启用。
+
+        Returns:
+            True 表示策略输出启用,False 表示策略被屏蔽（机器人保持静止）。
+        """
+        with self._state_lock:
+            return self._policy_enabled
+
+    def set_policy_enabled(self, enabled: bool) -> None:
+        """设置策略输出状态。
+
+        Args:
+            enabled: True 启用策略输出,False 屏蔽策略（保持静止）。
+        """
+        with self._state_lock:
+            self._policy_enabled = enabled
+            state_str = "ENABLED" if enabled else "DISABLED"
+            self._logger.info(f"策略输出: {state_str}")
 
     def get_master_action(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """获取主臂的最新关节位置。
@@ -282,36 +316,45 @@ class MasterArmController:
                 and self._master_right_position is not None
             )
 
-    def blend_action(self, policy_action: np.ndarray) -> np.ndarray:
-        """根据介入状态返回最终 action。
+    def blend_action(self, policy_action: np.ndarray, current_qpos: np.ndarray) -> np.ndarray:
+        """根据介入状态和策略状态返回最终 action。
 
-        - 介入模式: 返回主臂位姿 (如果数据就绪)
-        - RL 模式: 返回策略输出
+        控制优先级:
+        1. 遥操作介入开启 + 数据就绪: 返回 current_qpos + master_delta
+        2. 策略输出开启: 返回 policy_action
+        3. 两者都关闭: 返回 current_qpos (保持当前位置)
 
         Args:
             policy_action: RL 策略输出的 14D 动作 (左臂 7D + 右臂 7D)。
+            current_qpos: 当前从臂关节位置 (14D)，用于计算增量控制。
 
         Returns:
             最终的 14D 动作数组。
         """
         policy_action = np.asarray(policy_action, dtype=np.float64)
+        current_qpos = np.asarray(current_qpos, dtype=np.float64)
 
-        # 检查是否处于介入模式
-        if not self.get_intervention_state():
+        # 优先级 1: 检查遥操作介入
+        if self.get_intervention_state():
+            left_delta, right_delta = self.get_master_action()
+
+            if left_delta is not None and right_delta is not None:
+                # 主臂发布的是 delta qpos（增量），需要加到当前位置上
+                master_delta = np.concatenate([left_delta, right_delta])
+                master_action = current_qpos + master_delta
+                return master_action
+            else:
+                self._logger.warning(
+                    "遥操作介入已启用,但主臂数据尚未就绪,保持当前位置。"
+                )
+                return current_qpos
+
+        # 优先级 2: 检查策略输出
+        if self.get_policy_enabled():
             return policy_action
-
-        # 介入模式: 使用主臂数据
-        left_master, right_master = self.get_master_action()
-
-        if left_master is None or right_master is None:
-            self._logger.warning(
-                "介入模式已启用,但主臂数据尚未就绪,使用策略输出。"
-            )
-            return policy_action
-
-        # 拼接主臂动作 (左 7D + 右 7D = 14D)
-        master_action = np.concatenate([left_master, right_master])
-        return master_action
+        
+        # 优先级 3: 两者都关闭，保持当前位置
+        return current_qpos
 
     # ==================================================================
     # 上层接口
