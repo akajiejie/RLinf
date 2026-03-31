@@ -83,6 +83,20 @@ class RealWorldEnv(gym.Env):
             hardware_info=hardware_info,
             env_idx=env_idx,
         )
+        stack = self.cfg.get("realworld_stack", "franka")
+
+        if stack == "piper_joint":
+            # Piper 双臂关节空间：无 tcp_pose；不套 GripperCloseEnv（仅适用于 Franka 7D EE）
+            if not env.config.is_dummy and self.cfg.get("use_spacemouse", False):
+                env = SpacemouseIntervention(env)
+            if not env.config.is_dummy and self.cfg.get("keyboard_reward_wrapper", None):
+                if self.cfg.keyboard_reward_wrapper == "multi_stage":
+                    env = KeyboardRewardDoneMultiStageWrapper(env)
+                elif self.cfg.keyboard_reward_wrapper == "single_stage":
+                    env = KeyboardRewardDoneWrapper(env)
+            return env
+
+        # ---- Franka 默认栈 ----
         if self.cfg.get("no_gripper", True):
             env = GripperCloseEnv(env)
         if not env.config.is_dummy and self.cfg.get("use_spacemouse", True):

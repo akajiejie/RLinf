@@ -66,9 +66,6 @@ from .utils import (
 @dataclass
 class PiperRobotConfig:
     """Piper 双臂机械臂环境配置。
-
-    通过 YAML / OmegaConf 传入，对齐 ``FrankaRobotConfig`` 的风格。
-
     Attributes:
         ns_left: 左臂 ROS 命名空间。
         ns_right: 右臂 ROS 命名空间。
@@ -86,6 +83,9 @@ class PiperRobotConfig:
         min_qpos: 双臂关节下限 (8维: 6关节+1夹爪+1夹爪 per arm)。
         max_qpos: 双臂关节上限。
         enable_camera_player: 是否启用相机画面显示。
+        target_qpos: 奖励用目标关节位置（14 维）。
+        reward_threshold: 逐关节误差阈值，与 target_qpos 配合定义「目标区域」。
+        use_dense_reward / dense_reward_scale / success_hold_steps: 见 ``_calc_step_reward``。
     """
 
     # ---- ROS 命名空间 ----
@@ -148,6 +148,27 @@ class PiperRobotConfig:
     inference_host: str = "127.0.0.1"
     inference_port: int = 8080
 
+    # ---- 关节动作语义 ----
+    # absolute: 策略输出为绝对关节位置（与 min/max_qpos 一致）
+    # delta: 策略输出为 [-1,1]^14，按 delta_action_scale 缩放后加到当前 qpos 上（适合 SAC/CNN）
+    joint_action_mode: str = "absolute"
+    delta_action_scale: float = 0.05
+
+    # ---- 奖励（关节空间，语义对齐 FrankaEnv：qpos 与 target_qpos 的逐关节误差）----
+    # 目标关节位置（14 维：左臂 7 + 右臂 7），需在任务 YAML 或子类中按真机标定。
+    target_qpos: np.ndarray = field(
+        default_factory=lambda: np.zeros(14, dtype=np.float64)
+    )
+    # 逐关节绝对误差阈值；当前 qpos 与 target_qpos 逐维差均不超过 threshold 视为进入目标区域。
+    reward_threshold: np.ndarray = field(
+        default_factory=lambda: np.full(14, 0.1, dtype=np.float64)
+    )
+    use_dense_reward: bool = False
+    # 在目标区域内连续保持该步数后，step 返回 terminated=True（与 Franka success_hold_steps 一致）。
+    success_hold_steps: int = 1
+    # 稠密奖励：exp(-dense_reward_scale * sum_i (qpos_i - target_qpos_i)^2)，仅在目标区域外使用。
+    dense_reward_scale: float = 50.0
+
 
 # =========================================================================
 # 环境
@@ -187,6 +208,8 @@ class PiperEnv(gym.Env):
         self.config = config
         self.env_idx = env_idx
         self._num_steps = 0
+        self._success_hold_counter = 0
+        self._ensure_reward_config_arrays()
 
         # ---- 初始化控制器 ----
         if not self.config.is_dummy:
@@ -237,6 +260,17 @@ class PiperEnv(gym.Env):
 
         # ---- 初始化动作/观测空间 ----
         self._init_action_obs_spaces()
+        self._joint_limit_low: np.ndarray | None = None
+        self._joint_limit_high: np.ndarray | None = None
+        if self.config.joint_action_mode == "delta":
+            min_q = np.array(self.config.min_qpos, dtype=np.float32)
+            max_q = np.array(self.config.max_qpos, dtype=np.float32)
+            if len(min_q) < 14:
+                self._joint_limit_low = np.tile(min_q[:7], 2).astype(np.float64)
+                self._joint_limit_high = np.tile(max_q[:7], 2).astype(np.float64)
+            else:
+                self._joint_limit_low = min_q[:14].astype(np.float64)
+                self._joint_limit_high = max_q[:14].astype(np.float64)
 
         if self.config.is_dummy:
             self._logger.info("PiperEnv 以 dummy 模式初始化。")
@@ -313,19 +347,30 @@ class PiperEnv(gym.Env):
         max_qpos = np.array(self.config.max_qpos, dtype=np.float32)
         # 拼接为 [left_min(7), right_min(7)] 和 [left_max(7), right_max(7)]
         # min_qpos/max_qpos 配置中前 7 个为单臂限位，左右臂共享
-        if len(min_qpos) < 14:
+        if self.config.joint_action_mode == "delta":
+            # 策略输出归一化增量，在 step 内乘以 delta_action_scale 再累加到当前 qpos
+            self.action_space = gym.spaces.Box(
+                low=-np.ones(14, dtype=np.float32),
+                high=np.ones(14, dtype=np.float32),
+                dtype=np.float32,
+            )
+        elif len(min_qpos) < 14:
             # 单臂限位，复制为双臂
             action_low = np.tile(min_qpos[:7], 2).astype(np.float32)
             action_high = np.tile(max_qpos[:7], 2).astype(np.float32)
+            self.action_space = gym.spaces.Box(
+                low=action_low,
+                high=action_high,
+                dtype=np.float32,
+            )
         else:
             action_low = min_qpos[:14].astype(np.float32)
             action_high = max_qpos[:14].astype(np.float32)
-
-        self.action_space = gym.spaces.Box(
-            low=action_low,
-            high=action_high,
-            dtype=np.float32,
-        )
+            self.action_space = gym.spaces.Box(
+                low=action_low,
+                high=action_high,
+                dtype=np.float32,
+            )
 
         # ---- 观测空间 ----
         h, w = self.config.obs_img_resolution
@@ -374,21 +419,30 @@ class PiperEnv(gym.Env):
         """
         start_time = time.time()
 
-        # ---- 裁剪动作到合法范围 ----
-        action = np.clip(
-            np.asarray(action, dtype=np.float64),
-            self.action_space.low,
-            self.action_space.high,
-        )
+        action = np.asarray(action, dtype=np.float64)
+        action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        # ---- 人在回路介入: 根据遥操作和策略状态混合动作 ----
+        # ---- 增量关节：策略输出 [-1,1]^14 -> 绝对目标关节位置 ----
+        if self.config.joint_action_mode == "delta":
+            assert self._joint_limit_low is not None and self._joint_limit_high is not None
+            if not self.config.is_dummy and self._controller is not None:
+                current_qpos = self._controller.get_qpos()
+            else:
+                current_qpos = np.zeros(14, dtype=np.float64)
+            delta = action * float(self.config.delta_action_scale)
+            action = np.clip(
+                current_qpos + delta,
+                self._joint_limit_low,
+                self._joint_limit_high,
+            )
+
+        # ---- 人在回路介入: 根据遥操作和策略状态混合动作（均为绝对关节目标）----
         if self._master_controller is not None:
-            # 获取当前从臂位置
-            current_qpos = self._controller.get_qpos()
-            # blend_action() 内部处理优先级：
-            # 1. 遥操作 ON -> current_qpos + master_delta
-            # 2. 策略 ON -> policy_action
-            # 3. 两者 OFF -> current_qpos (保持)
+            current_qpos = (
+                self._controller.get_qpos()
+                if not self.config.is_dummy and self._controller is not None
+                else np.zeros(14, dtype=np.float64)
+            )
             action = self._master_controller.blend_action(action, current_qpos)
 
         # ---- 拆分为左右臂动作 ----
@@ -414,8 +468,10 @@ class PiperEnv(gym.Env):
         # ---- 计算奖励 ----
         reward = self._calc_step_reward(observation)
 
-        # ---- 终止条件 ----
-        terminated = False  # Piper 环境不自动终止，由外部任务逻辑决定
+        # ---- 终止条件（与 FrankaEnv 一致：在目标区域内连续保持 success_hold_steps 步）----
+        terminated = (reward == 1.0) and (
+            self._success_hold_counter >= self.config.success_hold_steps
+        )
         truncated = self._num_steps >= self.config.max_num_steps
 
         return observation, reward, terminated, truncated, {}
@@ -446,6 +502,7 @@ class PiperEnv(gym.Env):
             (observation, info) 二元组。
         """
         self._num_steps = 0
+        self._success_hold_counter = 0
 
         if self.config.is_dummy:
             observation = self._get_observation()
@@ -477,6 +534,14 @@ class PiperEnv(gym.Env):
         observation = self._get_observation()
         self._logger.info("PiperEnv reset 完成。")
         return observation, {}
+
+    def _ensure_reward_config_arrays(self) -> None:
+        """将 target_qpos / reward_threshold 规范为 14 维 float64（兼容 YAML 列表）。"""
+        cfg = self.config
+        cfg.target_qpos = np.asarray(cfg.target_qpos, dtype=np.float64).reshape(14)
+        cfg.reward_threshold = np.asarray(cfg.reward_threshold, dtype=np.float64).reshape(
+            14
+        )
 
     # ==================================================================
     # 观测构建
@@ -537,15 +602,51 @@ class PiperEnv(gym.Env):
     ) -> float:
         """计算当前步的奖励。
 
-        基础实现返回 0.0，具体任务应在子类（task env）中覆写。
+        参考 ``FrankaEnv._calc_step_reward``：在关节空间比较当前 ``qpos`` 与 ``target_qpos``，
+        逐关节绝对误差均不超过 ``reward_threshold`` 时视为进入目标区域，奖励为 1.0 并累计
+        ``_success_hold_counter``；否则清零计数，若 ``use_dense_reward`` 则按与目标位置的
+        平方距离给出稠密奖励 ``exp(-dense_reward_scale * sum_i delta_i^2)``。
+
+        ``is_dummy`` 时返回 0.0（与 Franka dummy 行为一致）。
 
         Args:
-            observation: 当前观测。
+            observation: 当前观测（需含 ``state.qpos``）。
 
         Returns:
             标量奖励值。
         """
-        return 0.0
+        if self.config.is_dummy:
+            return 0.0
+
+        qpos = np.asarray(observation["state"]["qpos"], dtype=np.float64).reshape(14)
+        target = np.asarray(self.config.target_qpos, dtype=np.float64).reshape(14)
+        thr = np.asarray(self.config.reward_threshold, dtype=np.float64).reshape(14)
+
+        target_delta = np.abs(qpos - target)
+        is_in_target_zone = bool(np.all(target_delta <= thr))
+
+        if is_in_target_zone:
+            self._success_hold_counter += 1
+            reward = 1.0
+        else:
+            self._success_hold_counter = 0
+            if self.config.use_dense_reward:
+                reward = float(
+                    np.exp(
+                        -self.config.dense_reward_scale
+                        * np.sum(np.square(target_delta))
+                    )
+                )
+            else:
+                reward = 0.0
+            self._logger.debug(
+                "Joint target not met: max_delta=%s, threshold=%s, reward=%s",
+                float(np.max(target_delta)),
+                thr,
+                reward,
+            )
+
+        return reward
 
     # ==================================================================
     # 属性与工具方法

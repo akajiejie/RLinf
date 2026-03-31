@@ -14,9 +14,9 @@
 
 from gymnasium.envs.registration import register
 
-from rlinf.envs.realworld.piper.task.test_task_env import PiperTestTaskEnv
+from rlinf.envs.realworld.piper.task.test_peg_insertion_env import PiperPegInsertionEnv
 
 register(
-    id="PiperTestTask-v1",
-    entry_point="rlinf.envs.realworld.piper.task:PiperTestTaskEnv",
+    id="PiperPegInsertionEnv-v1",
+    entry_point="rlinf.envs.realworld.piper.task:PiperPegInsertionEnv",
 )

@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Piper 测试任务环境。
+"""Piper 双臂插桩类任务环境（关节增量 + 可选主臂人在回路）。
 
-继承 ``PiperEnv``，作为集成测试和新任务开发的模板。
-对齐 ``rlinf.envs.realworld.franka.tasks.peg_insertion_env.PegInsertionEnv`` 的模式。
+与 ``Franka PegInsertionEnv`` 在 RLinf 中的用法对齐：通过 ``override_cfg`` 注入
+``PiperRobotConfig`` 字段；策略侧使用 ``joint_action_mode=delta`` 时输出
+``[-1,1]^14``，环境内乘 ``delta_action_scale`` 再累加到当前 qpos。
+
+奖励与成功条件可按真机标定在此子类中扩展。
 """
 
 from dataclasses import dataclass
@@ -24,19 +27,18 @@ from ..piper_env import PiperEnv, PiperRobotConfig
 
 
 @dataclass
-class PiperTestTaskConfig(PiperRobotConfig):
-    """测试任务配置，继承 PiperRobotConfig 并覆写默认值。"""
+class PiperPegInsertionConfig(PiperRobotConfig):
+    """插桩任务默认：增量关节、主臂介入开启（与 ``MasterArmController`` 配合）。"""
 
-    task_name: str = "piper_test_task"
+    task_name: str = "piper_peg_insertion"
     max_num_steps: int = 1000
+    joint_action_mode: str = "delta"
+    delta_action_scale: float = 0.05
+    enable_human_intervention: bool = True
 
 
-class PiperTestTaskEnv(PiperEnv):
-    """Piper 测试任务环境。
-
-    用于验证 PiperEnv 的基本功能：使能、归零、关节控制、观测读取。
-    具体任务逻辑（奖励、终止条件）可在此类中覆写。
-    """
+class PiperPegInsertionEnv(PiperEnv):
+    """Piper 双臂 peg-insertion 模板环境。"""
 
     def __init__(
         self,
@@ -47,9 +49,9 @@ class PiperTestTaskEnv(PiperEnv):
     ) -> None:
         if override_cfg is None:
             override_cfg = {}
-        config = PiperTestTaskConfig(**override_cfg)
+        config = PiperPegInsertionConfig(**override_cfg)
         super().__init__(config, worker_info, hardware_info, env_idx)
 
     @property
     def task_description(self) -> str:
-        return "piper test task"
+        return "peg and insertion"
