@@ -230,7 +230,7 @@ class PiperEnv(gym.Env):
             self._master_controller = MasterArmController(
                 master_left_topic=config.master_left_topic,
                 master_right_topic=config.master_right_topic,
-                enable_keyboard_trigger=True,
+                enable_keyboard_trigger=False,  # 禁用,让主臂节点独占键盘监听
                 trigger_key=config.intervention_trigger_key,
                 policy_enable_key=config.policy_enable_key,
             )

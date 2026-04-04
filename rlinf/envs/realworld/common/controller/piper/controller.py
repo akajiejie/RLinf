@@ -67,6 +67,8 @@ class MasterArmController:
         self._policy_enable_key = policy_enable_key
 
         # ---- 介入状态 ----
+        # 注意:在主从模式下,介入状态由主臂节点的 /enable_message_publish 参数控制
+        # MasterArmController 应该监听该参数,而不是自己维护状态
         self._intervention_enabled: bool = False
         self._policy_enabled: bool = True  # 策略输出默认开启
         self._state_lock = threading.Lock()
@@ -83,8 +85,14 @@ class MasterArmController:
         # ---- 订阅主臂话题 ----
         self._init_ros_subscriptions()
 
-        # ---- 启动键盘监听 ----
+        # ---- 启动键盘监听(仅在测试模式下) ----
+        # 警告:如果主臂节点也在运行键盘监听,会导致键盘事件冲突!
+        # 建议:在主从模式下关闭此键盘监听,让主臂节点独占
         if self._enable_keyboard:
+            self._logger.warning(
+                "MasterArmController 键盘监听已启用,可能与主臂节点冲突!"
+                " 建议在主从模式下设置 enable_keyboard_trigger=False"
+            )
             self._keyboard_thread = threading.Thread(
                 target=self._keyboard_listener_thread, daemon=True
             )
@@ -132,6 +140,10 @@ class MasterArmController:
 
         从 JointState 消息中提取 position[0:7] (6 关节 + 1 夹爪)。
         对齐 piper_start_ms_node_double_agilex_dyn_pos.py 第238-277行的数据格式。
+        
+        同时根据 header.frame_id 判断遥操作状态:
+        - frame_id == "Master_is_me": 主臂节点正在发布,遥操作已启用
+        - frame_id != "Master_is_me": 主臂节点未发布或策略控制模式
 
         Args:
             msg: sensor_msgs/JointState 消息。
@@ -141,6 +153,15 @@ class MasterArmController:
                 f"左主臂 JointState position 长度不足: {len(msg.position)} < 7"
             )
             return
+
+        # 根据 frame_id 更新遥操作状态
+        # 主臂节点发布时会设置 frame_id="Master_is_me"
+        with self._state_lock:
+            master_is_publishing = (msg.header.frame_id == "Master_is_me")
+            if master_is_publishing != self._intervention_enabled:
+                self._intervention_enabled = master_is_publishing
+                state_str = "ENABLED" if self._intervention_enabled else "DISABLED"
+                self._logger.info(f"遥操作介入(从主臂消息检测): {state_str}")
 
         position = np.array(msg.position[:7], dtype=np.float64)
         # 应用关节限位 (对齐 piper_start_ms_node_double_agilex_dyn_pos.py 第262-273行)

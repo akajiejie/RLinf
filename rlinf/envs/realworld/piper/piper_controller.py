@@ -355,26 +355,27 @@ class PiperController:
     ) -> None:
         """发布双臂关节控制指令。
 
-        对应 ``piper_ctrl_single_node.py`` 中 ``joint_callback`` 的接收逻辑:
+        对应 ``piper_start_ms_node_double_agilex_dyn_pos.py`` 中 ``joint_callback`` 的接收逻辑:
         - ``position[0:6]``: 6 个关节角度 (rad)
         - ``position[6]``: 夹爪角度 (rad)
-        - ``velocity[6]``: 全局速度百分比 (0-100)，可选
-        - ``effort[6]``: 夹爪力矩 (N·m)，可选
+        - ``velocity[6]``: 全局速度百分比 (0-100)
+        - ``effort[6]``: 夹爪力矩 (N·m)
+        - ``header.frame_id``: 如果是 "Master_is_me",从臂启用重力补偿;否则普通跟随模式
 
         Args:
-            left_action: 左臂动作，长度为 7 (6 关节 + 1 夹爪)，单位 rad。
-            right_action: 右臂动作，长度为 7 (6 关节 + 1 夹爪)，单位 rad。
-            left_speed_pct: 左臂速度百分比 (0-100)，None 使用默认值。
-            right_speed_pct: 右臂速度百分比 (0-100)，None 使用默认值。
+            left_action: 左臂动作,长度为 7 (6 关节 + 1 夹爪),单位 rad。
+            right_action: 右臂动作,长度为 7 (6 关节 + 1 夹爪),单位 rad。
+            left_speed_pct: 左臂速度百分比 (0-100),None 使用默认值。
+            right_speed_pct: 右臂速度百分比 (0-100),None 使用默认值。
         """
         left_action = np.asarray(left_action, dtype=np.float64)
         right_action = np.asarray(right_action, dtype=np.float64)
 
         assert len(left_action) == 7, (
-            f"左臂动作维度应为 7，实际为 {len(left_action)}"
+            f"左臂动作维度应为 7,实际为 {len(left_action)}"
         )
         assert len(right_action) == 7, (
-            f"右臂动作维度应为 7，实际为 {len(right_action)}"
+            f"右臂动作维度应为 7,实际为 {len(right_action)}"
         )
 
         # 关节限位裁剪
@@ -437,7 +438,7 @@ class PiperController:
     ) -> None:
         """构造 JointState 消息并发布到指定话题。
 
-        消息格式对齐 ``piper_ctrl_single_node.py`` 中 ``joint_callback`` 的期望:
+        消息格式对齐 ``piper_start_ms_node_double_agilex_dyn_pos.py`` 中 ``joint_callback`` 的期望:
         - ``position``: [j1, j2, j3, j4, j5, j6, gripper] (rad)
         - ``velocity``: [0, 0, 0, 0, 0, 0, speed_pct] — 第 7 个元素为全局速度百分比
         - ``effort``:   [0, 0, 0, 0, 0, 0, gripper_effort] — 夹爪力矩 (N·m)
