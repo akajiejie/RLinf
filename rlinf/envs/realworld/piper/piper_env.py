@@ -12,22 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Piper 双臂机械臂 Gym 环境。
+"""Piper dual-arm robot Gym environment.
 
-作为 RLinf 的统一接口，协调 ``PiperController`` 和 ``PiperRobotState``，
-提供标准的 ``gymnasium.Env`` API（step / reset / observation_space / action_space）。
+Unified RLinf interface coordinating ``PiperController`` and ``PiperRobotState``,
+providing standard ``gymnasium.Env`` API (step / reset / observation_space / action_space).
 
-架构对齐 ``rlinf.envs.realworld.franka.franka_env.FrankaEnv``。
+Architecture aligned with ``rlinf.envs.realworld.franka.franka_env.FrankaEnv``.
 
-**动作空间（Joint space）：**
+**Action Space (Joint space):**
 
-- 14 维绝对关节位置：左臂 7 维 (6 关节 + 1 夹爪) + 右臂 7 维
-- 对齐 ``collect_data_jeff.py`` 中 ``master_arm_left.position + master_arm_right.position``
+- 14D absolute joint positions: left arm 7D (6 joints + 1 gripper) + right arm 7D
 
-**观测空间：**
+**Observation Space:**
 
 - ``state``: qpos(14), qvel(14), effort(14), base_vel(2)
 - ``frames``: cam_high(480,640,3), cam_left_wrist(480,640,3), cam_right_wrist(480,640,3)
+
+**Human-in-the-loop:**
+
+- ``page_down``: toggle teleoperation (handled by ROS node via ``/enable_message_publish`` param)
+- ``page_up``: toggle policy output; when disabled, env holds current qpos
 """
 
 import copy
@@ -41,7 +45,7 @@ import gymnasium as gym
 import numpy as np
 import rospy
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, JointState
 
 from rlinf.utils.logging import get_logger
 
@@ -59,45 +63,49 @@ from .utils import (
 
 
 # =========================================================================
-# 配置
+# Configuration
 # =========================================================================
 
 
 @dataclass
 class PiperRobotConfig:
-    """Piper 双臂机械臂环境配置。
+    """Piper dual-arm robot environment configuration.
+
     Attributes:
-        ns_left: 左臂 ROS 命名空间。
-        ns_right: 右臂 ROS 命名空间。
-        use_robot_base: 是否使用底盘。
-        robot_base_topic: 底盘里程计话题。
-        camera_names: 相机名称列表，对应 ``collect_data_jeff.py`` 的 camera_names。
-        img_topics: 相机 ROS 话题列表，与 camera_names 一一对应。
-        img_resolution: 相机图像分辨率 (H, W)。
-        obs_img_resolution: 观测中图像的分辨率 (H, W)，用于 resize。
-        step_frequency: 控制频率 (Hz)，对应 ``collect_data_jeff.py`` 的 frame_rate。
-        publish_rate: 发布频率 (Hz)。
-        joint_speed_pct: 关节运动速度百分比 (0-100)。
-        is_dummy: 是否为虚拟模式（无真实硬件）。
-        max_num_steps: 每个 episode 的最大步数。
-        min_qpos: 双臂关节下限 (8维: 6关节+1夹爪+1夹爪 per arm)。
-        max_qpos: 双臂关节上限。
-        enable_camera_player: 是否启用相机画面显示。
-        target_qpos: 奖励用目标关节位置（14 维）。
-        reward_threshold: 逐关节误差阈值，与 target_qpos 配合定义「目标区域」。
-        use_dense_reward / dense_reward_scale / success_hold_steps: 见 ``_calc_step_reward``。
+        ns_left: Left arm ROS namespace.
+        ns_right: Right arm ROS namespace.
+        use_robot_base: Whether to use mobile base.
+        robot_base_topic: Mobile base odometry topic.
+        camera_names: Camera name list.
+        img_topics: Camera ROS topic list, one-to-one with camera_names.
+        img_resolution: Camera image resolution (H, W).
+        obs_img_resolution: Observation image resolution (H, W).
+        step_frequency: Control frequency (Hz).
+        publish_rate: Publishing frequency (Hz).
+        joint_speed_pct: Joint motion speed percentage (0-100).
+        is_dummy: Whether in dummy mode (no real hardware).
+        max_num_steps: Maximum steps per episode.
+        min_qpos: Per-arm joint lower limits (7D: 6 joints + 1 gripper).
+        max_qpos: Per-arm joint upper limits.
+        enable_camera_player: Whether to enable camera display.
+        target_qpos: Target joint positions for reward (14D).
+        reward_threshold: Per-joint error threshold for target zone.
+        use_dense_reward / dense_reward_scale / success_hold_steps: See ``_calc_step_reward``.
+        enable_human_intervention: Whether to enable human-in-the-loop intervention.
+        intervention_trigger_key: Key that toggles teleoperation in the ROS node (page_down).
+        policy_enable_key: Key that toggles policy output in piper_env (page_up).
+        master_joint_topic: ROS topic publishing master arm absolute joint targets.
     """
 
-    # ---- ROS 命名空间 ----
+    # ---- ROS namespaces ----
     ns_left: str = "/puppet_left"
     ns_right: str = "/puppet_right"
 
-    # ---- 底盘 ----
+    # ---- Mobile base ----
     use_robot_base: bool = False
     robot_base_topic: str = "/odom"
 
-    # ---- 相机配置 ----
-    # 对齐 collect_data_jeff.py 的 camera_names 和 topic
+    # ---- Camera configuration ----
     camera_names: list[str] = field(
         default_factory=lambda: ["cam_high", "cam_left_wrist", "cam_right_wrist"]
     )
@@ -108,24 +116,23 @@ class PiperRobotConfig:
             "/camera_r/color/image_raw",
         ]
     )
-    img_resolution: tuple[int, int] = (480, 640)  # (H, W) 原始图像分辨率
-    obs_img_resolution: tuple[int, int] = (480, 640)  # (H, W) 观测空间图像分辨率
+    img_resolution: tuple[int, int] = (480, 640)  # (H, W) raw image resolution
+    obs_img_resolution: tuple[int, int] = (480, 640)  # (H, W) observation resolution
 
-    # ---- 控制参数 ----
-    step_frequency: float = 30.0  # Hz，对应 collect_data_jeff.py 的 frame_rate
+    # ---- Control parameters ----
+    step_frequency: float = 30.0  # Hz
     publish_rate: int = 30
     joint_speed_pct: int = 50
     pos_lookahead_step: int = 50
     chunk_size: int = 50
 
-    # ---- 环境参数 ----
+    # ---- Environment parameters ----
     task_name: str = "task"
     is_dummy: bool = False
     max_num_steps: int = 10000
     enable_camera_player: bool = False
 
-    # ---- 关节限位 (per arm: 6 joints + 1 gripper) ----
-    # 双臂拼接后为 16 维 (8 + 8)
+    # ---- Joint limits (per arm: 6 joints + 1 gripper) ----
     min_qpos: list[float] = field(
         default_factory=lambda: [
             -2.618, 0.0, -2.967, -1.745, -1.22, -2.0944, 0.0, 0.0,
@@ -137,63 +144,64 @@ class PiperRobotConfig:
         ]
     )
 
-    # ---- 人在回路配置 ----
+    # ---- Human-in-the-loop configuration ----
     enable_human_intervention: bool = True
-    master_left_topic: str = "/master/joint_left"
-    master_right_topic: str = "/master/joint_right"
-    intervention_trigger_key: str = "page_down"  # 切换遥操作介入
-    policy_enable_key: str = "page_up"  # 切换策略输出
+    # page_down: handled by ROS node, toggles /enable_message_publish param
+    intervention_trigger_key: str = "Key.page_down"
+    # page_up: toggles policy output inside piper_env
+    policy_enable_key: str = "Key.page_up"
+    # Topic where ROS node publishes master arm absolute joint targets (14D)
+    master_joint_topic: str = "/master/joint_states"
 
-    # ---- ZMQ 推理服务（预留） ----
+    # ---- ZMQ inference service (reserved) ----
     inference_host: str = "127.0.0.1"
     inference_port: int = 8080
 
-    # ---- 关节动作语义 ----
-    # absolute: 策略输出为绝对关节位置（与 min/max_qpos 一致）
-    # delta: 策略输出为 [-1,1]^14，按 delta_action_scale 缩放后加到当前 qpos 上（适合 SAC/CNN）
+    # ---- Joint action semantics ----
+    # absolute: policy outputs absolute joint positions
+    # delta: policy outputs [-1,1]^14, scaled by delta_action_scale and added to current qpos
     joint_action_mode: str = "absolute"
     delta_action_scale: float = 0.05
 
-    # ---- 奖励（关节空间，语义对齐 FrankaEnv：qpos 与 target_qpos 的逐关节误差）----
-    # 目标关节位置（14 维：左臂 7 + 右臂 7），需在任务 YAML 或子类中按真机标定。
+    # ---- Reward (joint space, aligned with FrankaEnv) ----
+    # Target joint positions (14D: left 7 + right 7), calibrate per task.
     target_qpos: np.ndarray = field(
         default_factory=lambda: np.zeros(14, dtype=np.float64)
     )
-    # 逐关节绝对误差阈值；当前 qpos 与 target_qpos 逐维差均不超过 threshold 视为进入目标区域。
+    # Per-joint absolute error threshold; all joints within threshold = target zone.
     reward_threshold: np.ndarray = field(
         default_factory=lambda: np.full(14, 0.1, dtype=np.float64)
     )
     use_dense_reward: bool = False
-    # 在目标区域内连续保持该步数后，step 返回 terminated=True（与 Franka success_hold_steps 一致）。
+    # Hold success_hold_steps consecutive steps in target zone to terminate with success.
     success_hold_steps: int = 1
-    # 稠密奖励：exp(-dense_reward_scale * sum_i (qpos_i - target_qpos_i)^2)，仅在目标区域外使用。
+    # Dense reward: exp(-dense_reward_scale * sum_i (qpos_i - target_qpos_i)^2)
     dense_reward_scale: float = 50.0
 
 
 # =========================================================================
-# 环境
+# Environment
 # =========================================================================
 
 
 class PiperEnv(gym.Env):
-    """Piper 双臂机械臂 Gymnasium 环境。
+    """Piper dual-arm robot Gymnasium environment.
 
-    对齐 ``FrankaEnv`` 的接口设计，通过 ``PiperController`` 与 piper_ros 通信。
-    图像通过 ROS 话题订阅获取（使用 ``cv_bridge``），
-    对齐 ``collect_data_jeff.py`` 中 ``RosOperator`` 的数据流。
+    Aligned with ``FrankaEnv`` interface. Communicates with piper_ros via
+    ``PiperController``. Images are received via ROS topics using ``cv_bridge``.
 
-    **数据流：**
+    **Data flow:**
 
-    1. ``__init__``: 创建 PiperController → 订阅关节/位姿/图像话题 → 等待机械臂就绪
-    2. ``step(action)``: 拆分 14D 动作 → 限位裁剪 → 发布关节指令 → 频率控制 → 返回观测
-    3. ``reset()``: 使能 → 归零 → 等待到位 → 返回初始观测
-    4. ``_get_observation()``: 拼接 qpos/qvel/effort/base_vel + 相机图像
+    1. ``__init__``: create PiperController → subscribe joint/pose/image topics → wait for robot
+    2. ``step(action)``: split 14D action → clip → publish joint command → rate control → return obs
+    3. ``reset()``: enable → go_zero → wait for joint → return initial obs
+    4. ``_get_observation()``: concatenate qpos/qvel/effort/base_vel + camera images
 
     Args:
-        config: PiperRobotConfig 配置。
-        worker_info: RLinf Worker 信息（可选）。
-        hardware_info: 硬件信息（可选，预留）。
-        env_idx: 环境实例索引。
+        config: PiperRobotConfig instance.
+        worker_info: RLinf WorkerInfo (optional).
+        hardware_info: Hardware info (optional, reserved).
+        env_idx: Environment instance index.
     """
 
     def __init__(
@@ -211,7 +219,7 @@ class PiperEnv(gym.Env):
         self._success_hold_counter = 0
         self._ensure_reward_config_arrays()
 
-        # ---- 初始化控制器 ----
+        # ---- Initialize controller ----
         if not self.config.is_dummy:
             self._controller = PiperController(
                 ns_left=config.ns_left,
@@ -223,21 +231,7 @@ class PiperEnv(gym.Env):
         else:
             self._controller = None
 
-        # ---- 初始化主臂控制器（人在回路） ----
-        if not self.config.is_dummy and self.config.enable_human_intervention:
-            from rlinf.envs.realworld.common.controller.piper import MasterArmController
-
-            self._master_controller = MasterArmController(
-                master_left_topic=config.master_left_topic,
-                master_right_topic=config.master_right_topic,
-                enable_keyboard_trigger=False,  # 禁用,让主臂节点独占键盘监听
-                trigger_key=config.intervention_trigger_key,
-                policy_enable_key=config.policy_enable_key,
-            )
-        else:
-            self._master_controller = None
-
-        # ---- 图像缓存（ROS 回调线程安全写入） ----
+        # ---- Image buffer (thread-safe, written by ROS callback thread) ----
         self._bridge = CvBridge()
         self._img_lock = threading.Lock()
         self._latest_images: dict[str, np.ndarray] = {}
@@ -245,7 +239,7 @@ class PiperEnv(gym.Env):
             h, w = config.obs_img_resolution
             self._latest_images[cam_name] = np.zeros((h, w, 3), dtype=np.uint8)
 
-        # ---- 订阅相机话题 ----
+        # ---- Subscribe camera topics ----
         if not self.config.is_dummy:
             self._img_subscribers: list[rospy.Subscriber] = []
             for cam_name, topic in zip(config.camera_names, config.img_topics):
@@ -258,7 +252,7 @@ class PiperEnv(gym.Env):
                 )
                 self._img_subscribers.append(sub)
 
-        # ---- 初始化动作/观测空间 ----
+        # ---- Initialize action/observation spaces ----
         self._init_action_obs_spaces()
         self._joint_limit_low: np.ndarray | None = None
         self._joint_limit_high: np.ndarray | None = None
@@ -272,107 +266,104 @@ class PiperEnv(gym.Env):
                 self._joint_limit_low = min_q[:14].astype(np.float64)
                 self._joint_limit_high = max_q[:14].astype(np.float64)
 
+        # ---- Human-in-the-loop: keyboard + master arm topic ----
+        if config.enable_human_intervention and not config.is_dummy:
+            from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListener
+            self._keyboard = KeyboardListener()
+            self._policy_enabled = True
+            self._master_action: np.ndarray | None = None
+            self._master_action_lock = threading.Lock()
+            rospy.Subscriber(
+                config.master_joint_topic,
+                JointState,
+                self._on_master_joint_state,
+                queue_size=1,
+            )
+        else:
+            self._keyboard = None
+            self._policy_enabled = True
+            self._master_action = None
+            self._master_action_lock = threading.Lock()
+
         if self.config.is_dummy:
-            self._logger.info("PiperEnv 以 dummy 模式初始化。")
+            self._logger.info("PiperEnv initialized in dummy mode.")
             return
 
-        # ---- 等待机械臂就绪 ----
-        self._logger.info("等待 Piper 双臂机械臂就绪...")
+        # ---- Wait for robot ready ----
+        self._logger.info("Waiting for Piper dual-arm robot to be ready...")
         ready = self._controller.wait_for_robot(timeout=30.0)
         if not ready:
-            self._logger.warning("机械臂等待超时，部分话题可能未就绪。")
-
-        # ---- 等待主臂数据就绪（如果启用人在回路） ----
-        if self._master_controller is not None:
-            self._logger.info("等待主臂数据就绪...")
-            master_ready = self._master_controller.wait_for_master_data(timeout=10.0)
-            if not master_ready:
-                self._logger.warning(
-                    "主臂数据等待超时，人在回路功能可能不可用。"
-                )
+            self._logger.warning("Robot wait timed out; some topics may not be ready.")
 
         self._logger.info(
-            f"PiperEnv 初始化完成: env_idx={env_idx}, "
+            f"PiperEnv initialized: env_idx={env_idx}, "
             f"cameras={config.camera_names}, freq={config.step_frequency}Hz, "
             f"intervention={config.enable_human_intervention}"
         )
 
     # ==================================================================
-    # 图像 ROS 回调
+    # ROS callbacks: master arm + images
     # ==================================================================
 
-    def _make_img_callback(self, cam_name: str):
-        """创建指定相机名称的 ROS 图像回调闭包。
+    def _on_master_joint_state(self, msg: JointState) -> None:
+        """Store latest master arm absolute joint targets (14D).
 
-        对齐 ``collect_data_jeff.py`` 中 ``img_front_callback`` 等回调的逻辑。
-
-        Args:
-            cam_name: 相机名称。
-
-        Returns:
-            ROS 回调函数。
+        The ROS node publishes slave_ref + (current_master - master_ref) to
+        ``/master/joint_states`` when teleoperation is active.
         """
+        with self._master_action_lock:
+            self._master_action = np.array(msg.position[:14], dtype=np.float64)
+
+    def _make_img_callback(self, cam_name: str):
+        """Create a ROS image callback closure for the given camera name."""
 
         def _callback(msg: Image) -> None:
             try:
                 cv_image = self._bridge.imgmsg_to_cv2(msg, "passthrough")
-                # 如果需要 resize
                 h, w = self.config.obs_img_resolution
                 if cv_image.shape[0] != h or cv_image.shape[1] != w:
                     cv_image = cv2.resize(cv_image, (w, h))
                 with self._img_lock:
                     self._latest_images[cam_name] = cv_image
             except Exception as e:
-                self._logger.warning(f"图像回调异常 ({cam_name}): {e}")
+                self._logger.warning(f"Image callback error ({cam_name}): {e}")
 
         return _callback
 
     # ==================================================================
-    # 动作/观测空间
+    # Action / observation spaces
     # ==================================================================
 
     def _init_action_obs_spaces(self) -> None:
-        """初始化动作空间和观测空间。
+        """Initialize action and observation spaces.
 
-        **动作空间：**
-        14 维绝对关节位置（左臂 7 + 右臂 7），每臂 6 关节 + 1 夹爪。
+        Action space: 14D absolute joint positions (left 7 + right 7),
+        each arm: 6 joints + 1 gripper.
 
-        **观测空间：**
+        Observation space:
         - ``state``: qpos(14), qvel(14), effort(14), base_vel(2)
-        - ``frames``: 每个相机一个 (H, W, 3) 图像
+        - ``frames``: one (H, W, 3) image per camera
         """
-        # ---- 动作空间: 14D 关节空间 ----
-        # 构造双臂限位: 左臂 min/max + 右臂 min/max
         min_qpos = np.array(self.config.min_qpos, dtype=np.float32)
         max_qpos = np.array(self.config.max_qpos, dtype=np.float32)
-        # 拼接为 [left_min(7), right_min(7)] 和 [left_max(7), right_max(7)]
-        # min_qpos/max_qpos 配置中前 7 个为单臂限位，左右臂共享
+
         if self.config.joint_action_mode == "delta":
-            # 策略输出归一化增量，在 step 内乘以 delta_action_scale 再累加到当前 qpos
+            # Policy outputs normalized deltas; scaled and added to current qpos in step()
             self.action_space = gym.spaces.Box(
                 low=-np.ones(14, dtype=np.float32),
                 high=np.ones(14, dtype=np.float32),
                 dtype=np.float32,
             )
         elif len(min_qpos) < 14:
-            # 单臂限位，复制为双臂
+            # Single-arm limits, tile to dual-arm
             action_low = np.tile(min_qpos[:7], 2).astype(np.float32)
             action_high = np.tile(max_qpos[:7], 2).astype(np.float32)
-            self.action_space = gym.spaces.Box(
-                low=action_low,
-                high=action_high,
-                dtype=np.float32,
-            )
+            self.action_space = gym.spaces.Box(low=action_low, high=action_high, dtype=np.float32)
         else:
             action_low = min_qpos[:14].astype(np.float32)
             action_high = max_qpos[:14].astype(np.float32)
-            self.action_space = gym.spaces.Box(
-                low=action_low,
-                high=action_high,
-                dtype=np.float32,
-            )
+            self.action_space = gym.spaces.Box(low=action_low, high=action_high, dtype=np.float32)
 
-        # ---- 观测空间 ----
         h, w = self.config.obs_img_resolution
         state_space = gym.spaces.Dict(
             {
@@ -384,17 +375,12 @@ class PiperEnv(gym.Env):
         )
         frames_space = gym.spaces.Dict(
             {
-                cam_name: gym.spaces.Box(
-                    0, 255, shape=(h, w, 3), dtype=np.uint8
-                )
+                cam_name: gym.spaces.Box(0, 255, shape=(h, w, 3), dtype=np.uint8)
                 for cam_name in self.config.camera_names
             }
         )
         self.observation_space = gym.spaces.Dict(
-            {
-                "state": state_space,
-                "frames": frames_space,
-            }
+            {"state": state_space, "frames": frames_space}
         )
         self._base_observation_space = copy.deepcopy(self.observation_space)
 
@@ -402,33 +388,31 @@ class PiperEnv(gym.Env):
     # Gym API: step
     # ==================================================================
 
-    def step(
-        self, action: np.ndarray
-    ) -> tuple[dict, float, bool, bool, dict]:
-        """执行一步环境交互。
-
-        对齐 ``FrankaEnv.step()`` 的接口，以及 ``collect_data_jeff.py``
-        中 ``RosOperator.process()`` 的控制逻辑。
+    def step(self, action: np.ndarray) -> tuple[dict, float, bool, bool, dict]:
+        """Execute one environment step.
 
         Args:
-            action: 14 维关节位置数组 (左臂 7 + 右臂 7)，
-                    每臂 6 关节角度 (rad) + 1 夹爪 (rad/m)。
+            action: 14D joint position array (left 7 + right 7),
+                    each arm: 6 joint angles (rad) + 1 gripper (rad).
 
         Returns:
-            (observation, reward, terminated, truncated, info) 五元组。
+            (observation, reward, terminated, truncated, info) tuple.
+            info["intervene_action"] is set to the master arm's 14D joint target
+            when teleoperation is active.
         """
         start_time = time.time()
 
         action = np.asarray(action, dtype=np.float64)
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        # ---- 增量关节：策略输出 [-1,1]^14 -> 绝对目标关节位置 ----
+        # ---- Delta mode: policy output [-1,1]^14 -> absolute joint target ----
         if self.config.joint_action_mode == "delta":
             assert self._joint_limit_low is not None and self._joint_limit_high is not None
-            if not self.config.is_dummy and self._controller is not None:
-                current_qpos = self._controller.get_qpos()
-            else:
-                current_qpos = np.zeros(14, dtype=np.float64)
+            current_qpos = (
+                self._controller.get_qpos()
+                if not self.config.is_dummy and self._controller is not None
+                else np.zeros(14, dtype=np.float64)
+            )
             delta = action * float(self.config.delta_action_scale)
             action = np.clip(
                 current_qpos + delta,
@@ -436,45 +420,60 @@ class PiperEnv(gym.Env):
                 self._joint_limit_high,
             )
 
-        # ---- 人在回路介入: 根据遥操作和策略状态混合动作（均为绝对关节目标）----
-        if self._master_controller is not None:
-            current_qpos = (
-                self._controller.get_qpos()
-                if not self.config.is_dummy and self._controller is not None
-                else np.zeros(14, dtype=np.float64)
-            )
-            action = self._master_controller.blend_action(action, current_qpos)
+        # ---- page_up: toggle policy output ----
+        if self._keyboard is not None and self._keyboard.consume_press(self.config.policy_enable_key):
+            self._policy_enabled = not self._policy_enabled
+            self._logger.info(f"Policy output {'enabled' if self._policy_enabled else 'disabled'}.")
 
-        # ---- 拆分为左右臂动作 ----
+        # ---- If policy disabled, hold current position ----
+        if not self._policy_enabled and not self.config.is_dummy and self._controller is not None:
+            action = self._controller.get_qpos()
+
+        # ---- Split into left/right arm actions ----
         left_action, right_action = split_dual_arm_action(action)
 
-        # ---- 发布控制指令 ----
-        if not self.config.is_dummy:
+        # ---- Check teleop state once (ROS node owns channel when active) ----
+        teleop_active = (
+            not self.config.is_dummy
+            and rospy.get_param("/enable_message_publish", False)
+        )
+
+        # ---- Publish control command ----
+        # Skip move_arm during teleoperation: the ROS node writes to the same
+        # /master/joint_left|right topics; publishing here would conflict with it.
+        if not self.config.is_dummy and not teleop_active:
             self._controller.move_arm(left_action, right_action)
-        else:
+        elif self.config.is_dummy:
             self._logger.debug(f"Dummy step: left={left_action}, right={right_action}")
 
         self._num_steps += 1
 
-        # ---- 频率控制 ----
+        # ---- Rate control ----
         step_time = time.time() - start_time
         sleep_time = max(0.0, (1.0 / self.config.step_frequency) - step_time)
         if sleep_time > 0:
             time.sleep(sleep_time)
 
-        # ---- 获取观测 ----
+        # ---- Get observation ----
         observation = self._get_observation()
 
-        # ---- 计算奖励 ----
+        # ---- Compute reward ----
         reward = self._calc_step_reward(observation)
 
-        # ---- 终止条件（与 FrankaEnv 一致：在目标区域内连续保持 success_hold_steps 步）----
+        # ---- Termination (aligned with FrankaEnv) ----
         terminated = (reward == 1.0) and (
             self._success_hold_counter >= self.config.success_hold_steps
         )
         truncated = self._num_steps >= self.config.max_num_steps
 
-        return observation, reward, terminated, truncated, {}
+        # ---- Build info: record master arm action when teleop is active ----
+        info: dict = {}
+        if teleop_active:
+            with self._master_action_lock:
+                if self._master_action is not None:
+                    info["intervene_action"] = self._master_action.copy()
+
+        return observation, reward, terminated, truncated, info
 
     # ==================================================================
     # Gym API: reset
@@ -486,20 +485,20 @@ class PiperEnv(gym.Env):
         seed: Optional[int] = None,
         options: Optional[dict] = None,
     ) -> tuple[dict, dict]:
-        """重置环境到初始状态。
+        """Reset environment to initial state.
 
-        对齐 ``FrankaEnv.reset()`` 的逻辑:
-        1. 使能双臂
-        2. 归零
-        3. 等待到位
-        4. 返回初始观测
+        Aligned with ``FrankaEnv.reset()``:
+        1. Enable arms
+        2. Go to zero position
+        3. Wait for joints to reach zero
+        4. Return initial observation
 
         Args:
-            seed: 随机种子（预留）。
-            options: 额外选项（预留）。
+            seed: Random seed (reserved).
+            options: Extra options (reserved).
 
         Returns:
-            (observation, info) 二元组。
+            (observation, info) tuple.
         """
         self._num_steps = 0
         self._success_hold_counter = 0
@@ -508,14 +507,14 @@ class PiperEnv(gym.Env):
             observation = self._get_observation()
             return observation, {}
 
-        # ---- 使能 ----
+        # ---- Enable ----
         self._controller.enable_arm()
         time.sleep(0.5)
 
-        # ---- 归零 ----
+        # ---- Go to zero ----
         self._controller.go_zero()
 
-        # ---- 等待到位 ----
+        # ---- Wait for joints to reach zero ----
         self._controller._wait_for_joint(
             target_pos=np.zeros(6),
             side="left",
@@ -532,61 +531,45 @@ class PiperEnv(gym.Env):
         time.sleep(0.5)
 
         observation = self._get_observation()
-        self._logger.info("PiperEnv reset 完成。")
+        self._logger.info("PiperEnv reset complete.")
         return observation, {}
 
     def _ensure_reward_config_arrays(self) -> None:
-        """将 target_qpos / reward_threshold 规范为 14 维 float64（兼容 YAML 列表）。"""
+        """Normalize target_qpos / reward_threshold to 14D float64 (compatible with YAML lists)."""
         cfg = self.config
         cfg.target_qpos = np.asarray(cfg.target_qpos, dtype=np.float64).reshape(14)
-        cfg.reward_threshold = np.asarray(cfg.reward_threshold, dtype=np.float64).reshape(
-            14
-        )
+        cfg.reward_threshold = np.asarray(cfg.reward_threshold, dtype=np.float64).reshape(14)
 
     # ==================================================================
-    # 观测构建
+    # Observation
     # ==================================================================
 
     def _get_observation(self) -> dict:
-        """构建完整观测字典。
+        """Build the full observation dictionary.
 
-        对齐 ``collect_data_jeff.py`` 第 340-354 行的观测格式:
-
-        - ``state.qpos``: 14D 双臂关节位置 (6关节+1夹爪) × 2
-        - ``state.qvel``: 14D 双臂关节速度
-        - ``state.effort``: 14D 双臂关节力矩
-        - ``state.base_vel``: 2D 底盘速度 [linear.x, angular.z]
-        - ``frames``: 各相机图像
+        - ``state.qpos``: 14D dual-arm joint positions (6 joints + 1 gripper) x2
+        - ``state.qvel``: 14D dual-arm joint velocities
+        - ``state.effort``: 14D dual-arm joint efforts
+        - ``state.base_vel``: 2D base velocity [linear.x, angular.z]
+        - ``frames``: camera images
 
         Returns:
-            符合 observation_space 的字典。
+            Dict conforming to observation_space.
         """
         if not self.config.is_dummy:
-            # ---- 状态 ----
             state = {
                 "qpos": self._controller.get_qpos(),
                 "qvel": self._controller.get_qvel(),
                 "effort": self._controller.get_effort(),
                 "base_vel": self._controller.get_base_vel(),
             }
-
-            # ---- 图像 ----
             frames = self._get_camera_frames()
-
-            observation = {
-                "state": state,
-                "frames": frames,
-            }
-            return copy.deepcopy(observation)
+            return copy.deepcopy({"state": state, "frames": frames})
         else:
             return self._base_observation_space.sample()
 
     def _get_camera_frames(self) -> dict[str, np.ndarray]:
-        """线程安全地获取所有相机的最新帧。
-
-        Returns:
-            {cam_name: np.ndarray(H, W, 3)} 字典。
-        """
+        """Thread-safe retrieval of the latest frame from each camera."""
         frames = {}
         with self._img_lock:
             for cam_name in self.config.camera_names:
@@ -594,26 +577,24 @@ class PiperEnv(gym.Env):
         return frames
 
     # ==================================================================
-    # 奖励计算
+    # Reward
     # ==================================================================
 
-    def _calc_step_reward(
-        self, observation: dict, **kwargs: Any
-    ) -> float:
-        """计算当前步的奖励。
+    def _calc_step_reward(self, observation: dict, **kwargs: Any) -> float:
+        """Compute per-step reward.
 
-        参考 ``FrankaEnv._calc_step_reward``：在关节空间比较当前 ``qpos`` 与 ``target_qpos``，
-        逐关节绝对误差均不超过 ``reward_threshold`` 时视为进入目标区域，奖励为 1.0 并累计
-        ``_success_hold_counter``；否则清零计数，若 ``use_dense_reward`` 则按与目标位置的
-        平方距离给出稠密奖励 ``exp(-dense_reward_scale * sum_i delta_i^2)``。
+        Aligned with ``FrankaEnv._calc_step_reward``: compares current ``qpos``
+        against ``target_qpos`` in joint space. All per-joint absolute errors
+        within ``reward_threshold`` = target zone (reward 1.0, increment hold counter);
+        otherwise reset counter and optionally return dense reward.
 
-        ``is_dummy`` 时返回 0.0（与 Franka dummy 行为一致）。
+        Returns 0.0 in dummy mode.
 
         Args:
-            observation: 当前观测（需含 ``state.qpos``）。
+            observation: Current observation (must contain ``state.qpos``).
 
         Returns:
-            标量奖励值。
+            Scalar reward.
         """
         if self.config.is_dummy:
             return 0.0
@@ -632,10 +613,7 @@ class PiperEnv(gym.Env):
             self._success_hold_counter = 0
             if self.config.use_dense_reward:
                 reward = float(
-                    np.exp(
-                        -self.config.dense_reward_scale
-                        * np.sum(np.square(target_delta))
-                    )
+                    np.exp(-self.config.dense_reward_scale * np.sum(np.square(target_delta)))
                 )
             else:
                 reward = 0.0
@@ -649,30 +627,23 @@ class PiperEnv(gym.Env):
         return reward
 
     # ==================================================================
-    # 属性与工具方法
+    # Properties and utilities
     # ==================================================================
 
     @property
     def num_steps(self) -> int:
-        """当前 episode 已执行的步数。"""
+        """Number of steps executed in the current episode."""
         return self._num_steps
 
     @property
     def task_description(self) -> str:
-        """任务描述，供 RealWorldEnv 包装器使用。"""
+        """Task description string, used by RealWorldEnv wrapper."""
         return self.config.task_name
 
     def close(self) -> None:
-        """关闭环境，释放资源。"""
+        """Close environment and release resources."""
         if not self.config.is_dummy and hasattr(self, "_img_subscribers"):
             for sub in self._img_subscribers:
                 sub.unregister()
             self._img_subscribers = []
-        
-        # 清理主臂控制器资源
-        if self._master_controller is not None:
-            self._logger.info("关闭主臂控制器...")
-            # MasterArmController 中的线程是 daemon=True，会自动退出
-            self._master_controller = None
-        
-        self._logger.info("PiperEnv 已关闭。")
+        self._logger.info("PiperEnv closed.")

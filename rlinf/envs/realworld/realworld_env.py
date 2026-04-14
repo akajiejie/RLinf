@@ -120,7 +120,12 @@ class RealWorldEnv(gym.Env):
         processes are terminated before starting a new one.
 
         This function is called once when the RealWorldEnv class is first imported.
+        
+        Set RLINF_SKIP_ROS_CLEANUP=1 to skip ROS cleanup if you want to keep existing ROS nodes.
         """
+        if os.environ.get("RLINF_SKIP_ROS_CLEANUP", "0") == "1":
+            return
+        
         # Concurrency control is needed for multiple processes on the same node
         node_lock_file = "/tmp/.realworld.lock"
         # Check if the path is valid
