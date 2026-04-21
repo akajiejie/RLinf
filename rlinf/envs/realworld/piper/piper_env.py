@@ -511,18 +511,22 @@ class PiperEnv(gym.Env):
         self._controller.enable_arm()
         time.sleep(0.5)
 
-        # ---- Go to zero ----
-        self._controller.go_zero()
+        # ---- Go to reset pose: left arm all zeros, right arm preset pose ----
+        left_reset = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        right_reset = np.array([
+            0.7386661800000001, 1.549620296, -1.284977372, 0.047343016, 1.066229612, 0.176812384, 0.0289
+        ], dtype=np.float64)
+        self._controller.move_arm(left_reset, right_reset)
 
-        # ---- Wait for joints to reach zero ----
+        # ---- Wait for joints to reach reset pose ----
         self._controller._wait_for_joint(
-            target_pos=np.zeros(6),
+            target_pos=left_reset[:6],
             side="left",
             timeout=10.0,
             atol=0.05,
         )
         self._controller._wait_for_joint(
-            target_pos=np.zeros(6),
+            target_pos=right_reset[:6],
             side="right",
             timeout=10.0,
             atol=0.05,

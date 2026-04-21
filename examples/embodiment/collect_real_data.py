@@ -14,9 +14,11 @@
 
 
 import os
+import time
 
 import hydra
 import numpy as np
+import rospy
 import torch
 from tqdm import tqdm
 
@@ -118,11 +120,9 @@ class DataCollector(Worker):
 
         current_obs_processed = self._process_obs(obs)
 
+        action_dim = self.env.action_space.shape[-1]
         while success_cnt < self.num_data_episodes:
-            if self.cfg.env.eval.get("no_gripper", True):
-                action = np.zeros((1, 6))
-            else:
-                action = np.zeros((1, 7))
+            action = np.zeros((1, action_dim))
             next_obs, reward, done, _, info = self.env.step(action)
 
             if "intervene_action" in info:
@@ -198,6 +198,15 @@ class DataCollector(Worker):
                     self.buffer.add_trajectories([trajectory])
 
                     progress_bar.update(1)
+
+                # Wait for teleoperation to end before resetting
+                if rospy.get_param("/enable_message_publish", False):
+                    self.log_info(
+                        "Episode done. Waiting for teleoperation to exit (Page Down) before reset..."
+                    )
+                    while rospy.get_param("/enable_message_publish", False):
+                        time.sleep(0.1)
+                    self.log_info("Teleoperation exited. Resetting...")
 
                 # Reset for next episode
                 obs, _ = self.env.reset()
