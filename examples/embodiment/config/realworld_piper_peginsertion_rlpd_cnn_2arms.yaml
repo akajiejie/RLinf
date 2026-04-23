@@ -83,10 +83,10 @@ algorithm:
 
   demo_buffer:
     enable_cache: True
-    cache_size: 200
+    cache_size: 10
     min_buffer_size: 1
-    sample_window_size: 200
-    load_path: "/path/to/demo_data"
+    sample_window_size: 10
+    load_path: "/home/focal/shared_disk/users/kwj/RLinf/logs/20260421-07:27:00/demos"
     auto_save: False
 
   target_update_freq: 1
@@ -145,7 +145,7 @@ rollout:
   collect_prev_infos: false
 
   model:
-    model_path: "/path/to/model" # https://huggingface.co/RLinf/RLinf-ResNet10-pretrained
+    model_path: "/home/focal/shared_disk/models/RLinf-ResNet10-pretrained" # https://huggingface.co/RLinf/RLinf-ResNet10-pretrained
     precision: ${actor.model.precision}
     num_q_heads: 10
 
@@ -162,7 +162,8 @@ actor:
   enable_offload: false
 
   model:
-    model_path: "/path/to/model" # https://huggingface.co/RLinf/RLinf-ResNet10-pretrained 
+    model_type: "cnn_policy"
+    model_path: "/home/focal/shared_disk/models/RLinf-ResNet10-pretrained" # https://huggingface.co/RLinf/RLinf-ResNet10-pretrained
     state_dim: 44
     action_dim: 14
     image_size: [3, 128, 128]

@@ -62,7 +62,7 @@ class ROSController:
                     time.sleep(1)  # Wait for roscore to start
 
         # Initialize ros node
-        rospy.init_node("franka_controller", anonymous=True)
+        rospy.init_node("franka_controller", anonymous=True, disable_signals=True)
 
         # ROS channels
         self._output_channels: dict[str, rospy.Publisher] = {}
