@@ -4,7 +4,7 @@
 # 运行示例：
 #   bash examples/embodiment/run_realworld_async.sh realworld_piper_peginsertion_rlpd_cnn_2arms
 #
-# 状态维：RealWorldEnv 按 key 排序拼接 base_vel(2)+effort(14)+qpos(14)+qvel(14)=44
+# 状态维：RealWorldEnv 按 key 排序拼接 qpos(14)=14
 
 defaults:
   - env/realworld_piper_peg_insertion@env.train
@@ -32,7 +32,7 @@ runner:
   logger:
     log_path: "../results"
     project_name: rlinf
-    experiment_name: piper_peginsertion_rlpd_cnn_2arms
+    experiment_name: piper_sac_mlp
     logger_backends: ["tensorboard"]
 
   max_epochs: 8000
@@ -86,8 +86,8 @@ algorithm:
     cache_size: 10
     min_buffer_size: 1
     sample_window_size: 10
-    load_path: "/home/focal/shared_disk/users/kwj/RLinf/logs/20260421-07:27:00/demos"
-    auto_save: False
+    load_path: "/home/focal/shared_disk/users/kwj/RLinf/logs/20260428-11:31:16/demos"
+    auto_save: True
 
   target_update_freq: 1
 
@@ -108,12 +108,16 @@ env:
   group_name: "EnvGroup"
 
   train:
+    keyboard_reward_wrapper: single_stage
     ignore_terminations: False
     total_num_envs: 1
     override_cfg:
       is_dummy: False
       joint_action_mode: delta
-      delta_action_scale: 0.05
+      delta_action_scale: 0.005
+      target_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.772524984, 1.902564748, -1.4586672800000002, -0.015333276000000002, 1.1681897920000002, 0.28688402400000007, 0.0289]  # 14D: left 7 + right 7
+      reward_threshold: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.1]
+      success_hold_steps: 1
       enable_human_intervention: true
       camera_names:
         - cam_high
@@ -126,7 +130,10 @@ env:
     override_cfg:
       is_dummy: true
       joint_action_mode: delta
-      delta_action_scale: 0.05
+      delta_action_scale: 0.01
+      target_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.772524984, 1.902564748, -1.4586672800000002, -0.015333276000000002, 1.1681897920000002, 0.28688402400000007, 0.0289]
+      reward_threshold: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.095, 0.095, 0.095, 0.1, 0.1, 0.1]
+      success_hold_steps: 5
       enable_human_intervention: false
       camera_names:
         - cam_high
@@ -164,7 +171,7 @@ actor:
   model:
     model_type: "cnn_policy"
     model_path: "/home/focal/shared_disk/models/RLinf-ResNet10-pretrained" # https://huggingface.co/RLinf/RLinf-ResNet10-pretrained
-    state_dim: 44
+    state_dim: 14
     action_dim: 14
     image_size: [3, 128, 128]
     num_q_heads: 10

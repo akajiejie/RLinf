@@ -94,7 +94,11 @@ class PiperRobotConfig:
         enable_human_intervention: Whether to enable human-in-the-loop intervention.
         intervention_trigger_key: Key that toggles teleoperation in the ROS node (page_down).
         policy_enable_key: Key that toggles policy output in piper_env (page_up).
-        master_joint_topic: ROS topic publishing master arm absolute joint targets.
+        puppet_joint_topic_left: ROS topic for left puppet (slave) arm joint states (7D).
+        puppet_joint_topic_right: ROS topic for right puppet (slave) arm joint states (7D).
+        wait_teleop_release_before_reset: If True, ``reset`` waits until ``/enable_message_publish`` is False.
+        teleop_release_poll_sec: Poll interval while waiting for teleop release.
+        teleop_release_reset_timeout_sec: Max seconds to wait (None or <=0 = wait indefinitely).
     """
 
     # ---- ROS namespaces ----
@@ -147,11 +151,22 @@ class PiperRobotConfig:
     # ---- Human-in-the-loop configuration ----
     enable_human_intervention: bool = True
     # page_down: handled by ROS node, toggles /enable_message_publish param
-    intervention_trigger_key: str = "Key.page_down"
+    intervention_trigger_key: str = "Key.pagedown"
     # page_up: toggles policy output inside piper_env
-    policy_enable_key: str = "Key.page_up"
-    # Topic where ROS node publishes master arm absolute joint targets (14D)
-    master_joint_topic: str = "/master/joint_states"
+    policy_enable_key: str = "Key.pageup"
+    # Topics publishing puppet (slave) arm actual joint states (7D each).
+    # During teleoperation, these reflect what the slave arms are actually doing,
+    # which is what we record as the intervene_action for imitation learning.
+    # /puppet/joint_left and /puppet/joint_right are remapped from /puppet/joint_states
+    # in start_ms_piper_double_agilex_delta_qpose.launch.
+    puppet_joint_topic_left: str = "/puppet/joint_left"
+    puppet_joint_topic_right: str = "/puppet/joint_right"
+    # Before reset: block until teleop is off (same ROS param as step ``teleop_active``),
+    # so ``move_arm`` does not fight master arms during human intervention.
+    wait_teleop_release_before_reset: bool = True
+    teleop_release_poll_sec: float = 0.1
+    # None or <=0: wait indefinitely until teleop releases.
+    teleop_release_reset_timeout_sec: Optional[float] = None
 
     # ---- ZMQ inference service (reserved) ----
     inference_host: str = "127.0.0.1"
@@ -266,23 +281,33 @@ class PiperEnv(gym.Env):
                 self._joint_limit_low = min_q[:14].astype(np.float64)
                 self._joint_limit_high = max_q[:14].astype(np.float64)
 
-        # ---- Human-in-the-loop: keyboard + master arm topic ----
+        # ---- Human-in-the-loop: keyboard + puppet (slave) joint feedback ----
+        # _master_action_left/right store latest 7D puppet joint states per arm (naming kept
+        # for minimal diff). Combined to 14D when teleoperation is active for intervene_action.
         if config.enable_human_intervention and not config.is_dummy:
             from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListener
             self._keyboard = KeyboardListener()
             self._policy_enabled = True
-            self._master_action: np.ndarray | None = None
+            self._master_action_left: np.ndarray | None = None
+            self._master_action_right: np.ndarray | None = None
             self._master_action_lock = threading.Lock()
             rospy.Subscriber(
-                config.master_joint_topic,
+                config.puppet_joint_topic_left,
                 JointState,
-                self._on_master_joint_state,
+                self._on_master_joint_state_left,
+                queue_size=1,
+            )
+            rospy.Subscriber(
+                config.puppet_joint_topic_right,
+                JointState,
+                self._on_master_joint_state_right,
                 queue_size=1,
             )
         else:
             self._keyboard = None
             self._policy_enabled = True
-            self._master_action = None
+            self._master_action_left = None
+            self._master_action_right = None
             self._master_action_lock = threading.Lock()
 
         if self.config.is_dummy:
@@ -302,17 +327,18 @@ class PiperEnv(gym.Env):
         )
 
     # ==================================================================
-    # ROS callbacks: master arm + images
+    # ROS callbacks: puppet joint feedback + images
     # ==================================================================
 
-    def _on_master_joint_state(self, msg: JointState) -> None:
-        """Store latest master arm absolute joint targets (14D).
-
-        The ROS node publishes slave_ref + (current_master - master_ref) to
-        ``/master/joint_states`` when teleoperation is active.
-        """
+    def _on_master_joint_state_left(self, msg: JointState) -> None:
+        """Store latest left puppet arm joint state (7D: 6 joints + gripper)."""
         with self._master_action_lock:
-            self._master_action = np.array(msg.position[:14], dtype=np.float64)
+            self._master_action_left = np.array(msg.position[:7], dtype=np.float64)
+
+    def _on_master_joint_state_right(self, msg: JointState) -> None:
+        """Store latest right puppet arm joint state (7D: 6 joints + gripper)."""
+        with self._master_action_lock:
+            self._master_action_right = np.array(msg.position[:7], dtype=np.float64)
 
     def _make_img_callback(self, cam_name: str):
         """Create a ROS image callback closure for the given camera name."""
@@ -329,6 +355,39 @@ class PiperEnv(gym.Env):
                 self._logger.warning(f"Image callback error ({cam_name}): {e}")
 
         return _callback
+
+    def _teleop_active(self) -> bool:
+        """True when ROS teleop is on (same signal as ``step`` / ``intervene_action``)."""
+        if self.config.is_dummy:
+            return False
+        try:
+            return bool(rospy.get_param("/enable_message_publish", False))
+        except Exception:
+            return False
+
+    def _wait_for_teleop_release_before_reset(self) -> None:
+        """Block physical reset until teleop releases, avoiding ``move_arm`` vs master conflict."""
+        if self.config.is_dummy or not self.config.wait_teleop_release_before_reset:
+            return
+        poll = max(float(self.config.teleop_release_poll_sec), 0.05)
+        timeout = self.config.teleop_release_reset_timeout_sec
+        start = time.time()
+        warned = False
+        while self._teleop_active():
+            if not warned:
+                self._logger.info(
+                    "reset: teleop active (/enable_message_publish=True); "
+                    "waiting for release before moving arms to reset pose."
+                )
+                warned = True
+            if timeout is not None and float(timeout) > 0.0:
+                if time.time() - start > float(timeout):
+                    self._logger.warning(
+                        "reset: teleop still active after %.1f s timeout; proceeding with reset.",
+                        float(timeout),
+                    )
+                    break
+            time.sleep(poll)
 
     # ==================================================================
     # Action / observation spaces
@@ -368,9 +427,6 @@ class PiperEnv(gym.Env):
         state_space = gym.spaces.Dict(
             {
                 "qpos": gym.spaces.Box(-np.inf, np.inf, shape=(14,), dtype=np.float64),
-                "qvel": gym.spaces.Box(-np.inf, np.inf, shape=(14,), dtype=np.float64),
-                "effort": gym.spaces.Box(-np.inf, np.inf, shape=(14,), dtype=np.float64),
-                "base_vel": gym.spaces.Box(-np.inf, np.inf, shape=(2,), dtype=np.float64),
             }
         )
         frames_space = gym.spaces.Dict(
@@ -439,9 +495,12 @@ class PiperEnv(gym.Env):
         )
 
         # ---- Publish control command ----
-        # Skip move_arm during teleoperation: the ROS node writes to the same
-        # /master/joint_left|right topics; publishing here would conflict with it.
+        # Skip move_arm during teleoperation: the ROS node drives the puppet arms
+        # directly via /master/joint_left|right; publishing here would conflict.
         if not self.config.is_dummy and not teleop_active:
+            if left_action is not None and right_action is not None:
+                left_action = np.zeros(7, dtype=np.float64)
+                right_action[6] = 0.0
             self._controller.move_arm(left_action, right_action)
         elif self.config.is_dummy:
             self._logger.debug(f"Dummy step: left={left_action}, right={right_action}")
@@ -467,11 +526,14 @@ class PiperEnv(gym.Env):
         truncated = self._num_steps >= self.config.max_num_steps
 
         # ---- Build info: record master arm action when teleop is active ----
+        # Combine left (7D) + right (7D) master arm targets into a single 14D action.
         info: dict = {}
         if teleop_active:
             with self._master_action_lock:
-                if self._master_action is not None:
-                    info["intervene_action"] = self._master_action.copy()
+                if self._master_action_left is not None and self._master_action_right is not None:
+                    info["intervene_action"] = np.concatenate(
+                        [self._master_action_left, self._master_action_right]
+                    )
 
         return observation, reward, terminated, truncated, info
 
@@ -507,6 +569,8 @@ class PiperEnv(gym.Env):
             observation = self._get_observation()
             return observation, {}
 
+        self._wait_for_teleop_release_before_reset()
+
         # ---- Enable ----
         self._controller.enable_arm()
         time.sleep(0.5)
@@ -514,7 +578,7 @@ class PiperEnv(gym.Env):
         # ---- Go to reset pose: left arm all zeros, right arm preset pose ----
         left_reset = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64)
         right_reset = np.array([
-            0.7386661800000001, 1.549620296, -1.284977372, 0.047343016, 1.066229612, 0.176812384, 0.0289
+            0.751417744, 1.8729622800000003, -1.458789388, 0.0, 1.157723392, 0.19676832, 0.0289
         ], dtype=np.float64)
         self._controller.move_arm(left_reset, right_reset)
 
@@ -552,9 +616,6 @@ class PiperEnv(gym.Env):
         """Build the full observation dictionary.
 
         - ``state.qpos``: 14D dual-arm joint positions (6 joints + 1 gripper) x2
-        - ``state.qvel``: 14D dual-arm joint velocities
-        - ``state.effort``: 14D dual-arm joint efforts
-        - ``state.base_vel``: 2D base velocity [linear.x, angular.z]
         - ``frames``: camera images
 
         Returns:
@@ -563,9 +624,6 @@ class PiperEnv(gym.Env):
         if not self.config.is_dummy:
             state = {
                 "qpos": self._controller.get_qpos(),
-                "qvel": self._controller.get_qvel(),
-                "effort": self._controller.get_effort(),
-                "base_vel": self._controller.get_base_vel(),
             }
             frames = self._get_camera_frames()
             return copy.deepcopy({"state": state, "frames": frames})

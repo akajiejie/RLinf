@@ -241,9 +241,6 @@ class PiperController:
         """Return current right arm state."""
         return self._state_right
 
-    def get_base_vel(self) -> np.ndarray:
-        """Return base velocity [linear.x, angular.z]."""
-        return self._base_vel.copy()
 
     def get_qpos(self) -> np.ndarray:
         """Return concatenated dual-arm qpos (14D).
