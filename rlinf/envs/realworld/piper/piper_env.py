@@ -271,7 +271,7 @@ class PiperEnv(gym.Env):
         self._init_action_obs_spaces()
         self._joint_limit_low: np.ndarray | None = None
         self._joint_limit_high: np.ndarray | None = None
-        if self.config.joint_action_mode == "delta":
+        if self.config.joint_action_mode in ("delta", "absolute_normalized"):
             min_q = np.array(self.config.min_qpos, dtype=np.float32)
             max_q = np.array(self.config.max_qpos, dtype=np.float32)
             if len(min_q) < 14:
@@ -406,8 +406,8 @@ class PiperEnv(gym.Env):
         min_qpos = np.array(self.config.min_qpos, dtype=np.float32)
         max_qpos = np.array(self.config.max_qpos, dtype=np.float32)
 
-        if self.config.joint_action_mode == "delta":
-            # Policy outputs normalized deltas; scaled and added to current qpos in step()
+        if self.config.joint_action_mode in ("delta", "absolute_normalized"):
+            # Policy outputs [-1,1]^14; step() converts to absolute joint target
             self.action_space = gym.spaces.Box(
                 low=-np.ones(14, dtype=np.float32),
                 high=np.ones(14, dtype=np.float32),
@@ -461,8 +461,20 @@ class PiperEnv(gym.Env):
         action = np.asarray(action, dtype=np.float64)
         action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        # ---- Delta mode: policy output [-1,1]^14 -> absolute joint target ----
-        if self.config.joint_action_mode == "delta":
+        # ---- Delta / absolute_normalized: policy output [-1,1]^14 -> absolute joint target ----
+        if self.config.joint_action_mode == "absolute_normalized":
+            assert self._joint_limit_low is not None and self._joint_limit_high is not None
+            lo, hi = self._joint_limit_low, self._joint_limit_high
+            action = (action + 1.0) / 2.0 * (hi - lo) + lo
+            if self.config.delta_action_scale > 0:
+                current_qpos = (
+                    self._controller.get_qpos()
+                    if not self.config.is_dummy and self._controller is not None
+                    else np.zeros(14, dtype=np.float64)
+                )
+                scale = float(self.config.delta_action_scale)
+                action = np.clip(action, current_qpos - scale, current_qpos + scale)
+        elif self.config.joint_action_mode == "delta":
             assert self._joint_limit_low is not None and self._joint_limit_high is not None
             current_qpos = (
                 self._controller.get_qpos()

@@ -112,9 +112,9 @@ env:
     ignore_terminations: False
     total_num_envs: 1
     override_cfg:
-      is_dummy: False
-      joint_action_mode: delta
-      delta_action_scale: 0.005
+      is_dummy: true
+      joint_action_mode: absolute_normalized
+      delta_action_scale: 0.01
       target_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.772524984, 1.902564748, -1.4586672800000002, -0.015333276000000002, 1.1681897920000002, 0.28688402400000007, 0.0289]  # 14D: left 7 + right 7
       reward_threshold: [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.1]
       success_hold_steps: 1
@@ -129,7 +129,7 @@ env:
     total_num_envs: 1
     override_cfg:
       is_dummy: true
-      joint_action_mode: delta
+      joint_action_mode: absolute_normalized
       delta_action_scale: 0.01
       target_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.772524984, 1.902564748, -1.4586672800000002, -0.015333276000000002, 1.1681897920000002, 0.28688402400000007, 0.0289]
       reward_threshold: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.095, 0.095, 0.095, 0.1, 0.1, 0.1]
