@@ -17,7 +17,7 @@ GITHUB_PREFIX=""
 NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
-SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "dexbotic" "starvla" "lingbotvla" "dreamzero")
+SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gigaworld" "gr00t" "dexbotic" "starvla" "lingbotvla" "dreamzero")
 SUPPORTED_ENVS=("behavior" "maniskill_libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "frankasim" "robotwin" "habitat" "opensora" "wan" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "piper-rosbase")
 
 #=======================Utility Functions=======================
@@ -543,6 +543,49 @@ EOF
     
     bash $SCRIPT_DIR/embodied/download_assets.sh --assets openpi
     uv pip uninstall pynvml || true
+}
+
+# Gigaworld (GigaWorld-Policy): giga-train / giga-models / giga-datasets + Piper ROS base.
+# Optional env:
+#   GIGA_WORLD_POLICY_PATH  - existing checkout (skip clone; must exist).
+#   GIGA_WORLD_POLICY_GIT_REF - git branch or tag for shallow clone (default: upstream default branch).
+# Notes: giga-train pulls DeepSpeed (may require CUDA build env). No OpenPI / flash-attn here.
+# After install: symlink piper_ws from the piper venv if desired; see giga-world-policy Readme for Wan weights.
+install_gigaworld_model() {
+    case "$ENV_NAME" in
+        piper-rosbase)
+            create_and_sync_venv
+            install_common_embodied_deps
+            if [ "$NO_ROOT" -eq 0 ]; then
+                bash $SCRIPT_DIR/embodied/ros_piper_install.sh
+            fi
+            install_piper_rosbase_env
+
+            local giga_root
+            if [ -n "${GIGA_WORLD_POLICY_GIT_REF:-}" ]; then
+                giga_root="$(clone_or_reuse_repo GIGA_WORLD_POLICY_PATH "$VENV_DIR/giga-world-policy" "${GITHUB_PREFIX}https://github.com/open-gigaai/giga-world-policy.git" -b "${GIGA_WORLD_POLICY_GIT_REF}" --depth 1)"
+            else
+                giga_root="$(clone_or_reuse_repo GIGA_WORLD_POLICY_PATH "$VENV_DIR/giga-world-policy" "${GITHUB_PREFIX}https://github.com/open-gigaai/giga-world-policy.git" --depth 1)"
+            fi
+
+            uv pip install "${giga_root}/third_party/giga-train"
+            uv pip install "${giga_root}/third_party/giga-models"
+            uv pip install "${giga_root}/third_party/giga-datasets"
+
+            local rlinf_root
+            rlinf_root="$(realpath "$SCRIPT_DIR/..")"
+            if ! grep -q "RLinf gigaworld policy PYTHONPATH" "$VENV_DIR/bin/activate" 2>/dev/null; then
+                echo "# RLinf gigaworld policy PYTHONPATH" >> "$VENV_DIR/bin/activate"
+                echo "export PYTHONPATH=\"${giga_root}:${rlinf_root}:\${PYTHONPATH}\"" >> "$VENV_DIR/bin/activate"
+            fi
+
+            uv pip uninstall pynvml || true
+            ;;
+        *)
+            echo "Environment '$ENV_NAME' is not supported for Gigaworld model." >&2
+            exit 1
+            ;;
+    esac
 }
 
 install_starvla_model() {
@@ -1171,6 +1214,9 @@ main() {
                     ;;
                 openpi)
                     install_openpi_model
+                    ;;
+                gigaworld)
+                    install_gigaworld_model
                     ;;
                 starvla)
                     install_starvla_model
