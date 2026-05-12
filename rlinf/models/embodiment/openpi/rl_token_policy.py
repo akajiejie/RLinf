@@ -70,14 +70,15 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
             activation="relu",
             bias_last=True,
         )
+        critic_input_dim = config.rl_token_dim + config.action_horizon * config.action_dim
         self.critic_head_1 = ValueHead(
-            input_dim=config.rl_token_dim + config.action_dim,
+            input_dim=critic_input_dim,
             hidden_sizes=config.critic_hidden_dims,
             output_dim=1,
             activation="relu",
         )
         self.critic_head_2 = ValueHead(
-            input_dim=config.rl_token_dim + config.action_dim,
+            input_dim=critic_input_dim,
             hidden_sizes=config.critic_hidden_dims,
             output_dim=1,
             activation="relu",
@@ -209,9 +210,8 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
         return flat.reshape(flat.shape[0], self.config.action_horizon, self.config.action_dim)
 
     def _compute_q(self, rl_state: Tensor, action: Tensor, use_target: bool):
-        # Flatten action to (B, action_dim) if chunked
         if action.dim() == 3:
-            action = action.reshape(action.shape[0], -1)[..., : self.config.action_dim]
+            action = action.reshape(action.shape[0], -1)
         critic_input = torch.cat([rl_state, action], dim=-1)
         if use_target:
             q1 = self.target_critic_head_1(critic_input)

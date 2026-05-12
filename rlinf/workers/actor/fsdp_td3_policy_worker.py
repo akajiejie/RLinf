@@ -162,6 +162,7 @@ class EmbodiedTD3FSDPPolicy(EmbodiedFSDPActor):
             self.cfg.algorithm, self.cfg.actor.policy_head
         )
         self.td3_algorithm.set_discount(self.cfg.algorithm.gamma)
+        self.td3_algorithm.set_action_horizon(self.cfg.actor.model.action_horizon)
         self.target_update_type = self.cfg.algorithm.get("target_update_type", "all")
 
     # ------------------------------------------------------------------
@@ -251,7 +252,8 @@ class EmbodiedTD3FSDPPolicy(EmbodiedFSDPActor):
         q_pi = torch.minimum(q1, q2)
 
         ref_action = self.reshape_action_fn(
-            batch["actions"].to(self.device, dtype=self.torch_dtype), "batch.actions"
+            batch["curr_obs"]["ref_action"].to(self.device, dtype=self.torch_dtype),
+            "curr_obs.ref_action",
         )
         bc_loss = torch.nn.functional.mse_loss(actions, ref_action)
 
@@ -352,6 +354,9 @@ class EmbodiedTD3FSDPPolicy(EmbodiedFSDPActor):
     # ------------------------------------------------------------------
     # Trajectory reception
     # ------------------------------------------------------------------
+
+    def add_trajectories(self, trajectories: list):
+        self.replay_buffer.add_trajectories(trajectories)
 
     async def recv_rollout_trajectories(self, input_channel: Channel):
         clear_memory(sync=False)

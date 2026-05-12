@@ -1,5 +1,5 @@
 #! /bin/bash
-
+export RLINF_SKIP_ROS_CLEANUP=1
 export EMBODIED_PATH="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export REPO_PATH=$(dirname $(dirname "$EMBODIED_PATH"))
 export SRC_FILE="${EMBODIED_PATH}/train_async.py"

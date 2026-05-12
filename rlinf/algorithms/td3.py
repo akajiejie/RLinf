@@ -152,7 +152,8 @@ class TD3Algorithm:
             target_q = torch.minimum(target_q1, target_q2)
             if self.enable_critic_q_upper_bound and self.critic_target_clamp_to_upper_bound:
                 target_q = torch.clamp(target_q, max=self.critic_q_upper_bound)
-            target_q_values = rewards_for_bootstrap + (1.0 - done_mask) * self._discount * target_q
+            chunk_discount = self._discount ** getattr(self, "_action_horizon", 1)
+            target_q_values = rewards_for_bootstrap + (1.0 - done_mask) * chunk_discount * target_q
             if self.enable_critic_q_upper_bound and self.critic_target_clamp_to_upper_bound:
                 target_q_values = torch.clamp(target_q_values, max=self.critic_q_upper_bound)
 
@@ -279,3 +280,6 @@ class TD3Algorithm:
 
     def set_discount(self, discount: float):
         self._discount = discount
+
+    def set_action_horizon(self, action_horizon: int):
+        self._action_horizon = action_horizon
