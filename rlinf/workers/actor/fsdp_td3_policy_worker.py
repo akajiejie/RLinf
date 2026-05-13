@@ -200,6 +200,24 @@ class EmbodiedTD3FSDPPolicy(EmbodiedFSDPActor):
         # Identity: prefix extraction happens inside policy.td3_forward
         return visual_latent
 
+    def get_visual_input(self, obs):
+        return obs["visual_latent"] if "visual_latent" in obs else obs
+
+    def get_robot_state(self, obs):
+        robot_state = obs.get("robot_state", obs.get("states", None))
+        if robot_state is None:
+            return None
+        return robot_state.to(self.device, dtype=self.torch_dtype)
+
+    def get_ref_action(self, obs, fallback_action, name):
+        ref_action = obs.get("ref_action", None)
+        if ref_action is None:
+            return fallback_action
+        return self.reshape_action_fn(
+            ref_action.to(self.device, dtype=self.torch_dtype),
+            name,
+        )
+
     def reshape_action_fn(self, action, name):
         action_horizon = self.cfg.actor.model.action_horizon
         action_dim = self.cfg.actor.model.action_dim
@@ -229,19 +247,27 @@ class EmbodiedTD3FSDPPolicy(EmbodiedFSDPActor):
     @Worker.timer("forward_actor")
     def forward_actor(self, batch):
         curr_obs = batch["curr_obs"]
-        visual_feat = self.build_visual_feat_fn(curr_obs["visual_latent"])
+        visual_feat = self.build_visual_feat_fn(self.get_visual_input(curr_obs))
+        sampled_actions = self.reshape_action_fn(
+            batch["actions"].to(self.device, dtype=self.torch_dtype),
+            "batch.actions",
+        )
+        ref_action = self.get_ref_action(
+            curr_obs,
+            sampled_actions,
+            "curr_obs.ref_action",
+        )
+        recon_coef = getattr(self.cfg.actor.model, "recon_loss_coef", 0.1)
 
         actions, actor_aux = self.model(
             forward_type=ForwardType.TD3,
             mode="actor",
             visual_feat=visual_feat,
-            robot_state=curr_obs["robot_state"].to(self.device, dtype=self.torch_dtype),
-            ref_action=self.reshape_action_fn(
-                curr_obs["ref_action"].to(self.device, dtype=self.torch_dtype),
-                "curr_obs.ref_action",
-            ),
+            robot_state=self.get_robot_state(curr_obs),
+            ref_action=ref_action,
             ref_action_dropout_p=0.0,
             use_target=False,
+            compute_recon_loss=recon_coef > 0.0,
         )
 
         q1, q2 = self.model(
@@ -251,19 +277,12 @@ class EmbodiedTD3FSDPPolicy(EmbodiedFSDPActor):
         )
         q_pi = torch.minimum(q1, q2)
 
-        ref_action = self.reshape_action_fn(
-            batch["curr_obs"]["ref_action"].to(self.device, dtype=self.torch_dtype),
-            "curr_obs.ref_action",
-        )
         bc_loss = torch.nn.functional.mse_loss(actions, ref_action)
 
         actor_loss, actor_metrics = self.td3_algorithm.compose_actor_loss(q_pi, bc_loss)
 
-        recon_coef = getattr(self.cfg.actor.model, "recon_loss_coef", 0.1)
-        if recon_coef > 0.0 and "prefix_output" in actor_aux:
-            recon_loss = self.model.compute_recon_loss(
-                actor_aux["prefix_output"], actor_aux["rl_state"]
-            )
+        if recon_coef > 0.0 and "recon_loss" in actor_aux:
+            recon_loss = actor_aux["recon_loss"]
             actor_loss = actor_loss + recon_coef * recon_loss
             actor_metrics["recon_loss"] = recon_loss.item()
 

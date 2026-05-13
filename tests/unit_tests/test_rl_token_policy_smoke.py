@@ -17,6 +17,7 @@ HIDDEN_DIM = 64  # small for speed; production uses 2048
 RL_TOKEN_DIM = 16
 ACTION_HORIZON = 3
 ACTION_DIM = 7
+ROBOT_STATE_DIM = 8
 
 
 def _make_policy():
@@ -31,12 +32,17 @@ def _make_policy():
         critic_hidden_dims=(32,),
         action_horizon=ACTION_HORIZON,
         action_dim=ACTION_DIM,
+        robot_state_dim=ROBOT_STATE_DIM,
     )
     return OpenPiRLTokenPolicy(cfg)
 
 
 def _fake_prefix():
     return torch.randn(B, L, HIDDEN_DIM)
+
+
+def _expected_rl_state_dim():
+    return RL_TOKEN_DIM + ROBOT_STATE_DIM + ACTION_HORIZON * ACTION_DIM
 
 
 def test_actor_forward():
@@ -47,18 +53,19 @@ def test_actor_forward():
     actions, aux = policy.td3_forward(
         mode="actor",
         visual_feat=fake_prefix,
-        robot_state=torch.randn(B, 8),
+        robot_state=torch.randn(B, ROBOT_STATE_DIM),
         ref_action=torch.randn(B, ACTION_HORIZON, ACTION_DIM),
     )
     assert actions.shape == (B, ACTION_HORIZON, ACTION_DIM), actions.shape
-    assert aux["rl_state"].shape == (B, RL_TOKEN_DIM), aux["rl_state"].shape
+    assert aux["rl_state"].shape == (B, _expected_rl_state_dim()), aux["rl_state"].shape
+    assert aux["rl_token"].shape == (B, RL_TOKEN_DIM), aux["rl_token"].shape
     assert aux["prefix_output"].shape == (B, L, HIDDEN_DIM), aux["prefix_output"].shape
 
 
 def test_critic_forward():
     policy = _make_policy()
     policy.eval()
-    rl_state = torch.randn(B, RL_TOKEN_DIM)
+    rl_state = torch.randn(B, _expected_rl_state_dim())
     action = torch.randn(B, ACTION_HORIZON, ACTION_DIM)
 
     q1, q2 = policy.td3_forward(mode="critic", rl_state=rl_state, action=action)
@@ -71,18 +78,18 @@ def test_target_actor_forward():
     policy.eval()
     actions, aux = policy.target_actor_forward(
         visual_feat=_fake_prefix(),
-        robot_state=torch.randn(B, 8),
+        robot_state=torch.randn(B, ROBOT_STATE_DIM),
         ref_action=torch.randn(B, ACTION_HORIZON, ACTION_DIM),
     )
     assert actions.shape == (B, ACTION_HORIZON, ACTION_DIM)
-    assert aux["rl_state"].shape == (B, RL_TOKEN_DIM)
+    assert aux["rl_state"].shape == (B, _expected_rl_state_dim())
 
 
 def test_target_critic_forward():
     policy = _make_policy()
     policy.eval()
     tq1, tq2 = policy.target_critic_forward(
-        rl_state=torch.randn(B, RL_TOKEN_DIM),
+        rl_state=torch.randn(B, _expected_rl_state_dim()),
         action=torch.randn(B, ACTION_HORIZON, ACTION_DIM),
     )
     assert tq1.shape == (B, 1)
@@ -99,6 +106,40 @@ def test_recon_loss():
     assert loss.item() >= 0.0
 
 
+def test_actor_aux_rl_token_is_used_for_recon_loss():
+    policy = _make_policy()
+    policy.eval()
+    prefix = _fake_prefix()
+
+    _, aux = policy.td3_forward(
+        mode="actor",
+        visual_feat=prefix,
+        robot_state=torch.randn(B, ROBOT_STATE_DIM),
+        ref_action=torch.randn(B, ACTION_HORIZON, ACTION_DIM),
+    )
+
+    loss = policy.compute_recon_loss(aux["prefix_output"], aux["rl_token"])
+    assert loss.shape == (), loss.shape
+    assert aux["rl_state"].shape[-1] != aux["rl_token"].shape[-1]
+
+
+def test_actor_forward_can_compute_recon_loss_inside_forward():
+    policy = _make_policy()
+    policy.eval()
+    prefix = _fake_prefix()
+
+    _, aux = policy.td3_forward(
+        mode="actor",
+        visual_feat=prefix,
+        robot_state=torch.randn(B, ROBOT_STATE_DIM),
+        ref_action=torch.randn(B, ACTION_HORIZON, ACTION_DIM),
+        compute_recon_loss=True,
+    )
+
+    assert aux["recon_loss"].shape == (), aux["recon_loss"].shape
+    assert aux["recon_loss"].item() >= 0.0
+
+
 def test_base_policy_forward_dispatch():
     """Verify BasePolicy.forward routes TD3/TD3_Q correctly."""
     policy = _make_policy()
@@ -109,7 +150,7 @@ def test_base_policy_forward_dispatch():
         forward_type=ForwardType.TD3,
         mode="actor",
         visual_feat=fake_prefix,
-        robot_state=torch.randn(B, 8),
+        robot_state=torch.randn(B, ROBOT_STATE_DIM),
         ref_action=torch.randn(B, ACTION_HORIZON, ACTION_DIM),
     )
     assert actions.shape == (B, ACTION_HORIZON, ACTION_DIM)
@@ -128,5 +169,7 @@ if __name__ == "__main__":
     test_target_actor_forward()
     test_target_critic_forward()
     test_recon_loss()
+    test_actor_aux_rl_token_is_used_for_recon_loss()
+    test_actor_forward_can_compute_recon_loss_inside_forward()
     test_base_policy_forward_dispatch()
     print("All smoke tests passed.")

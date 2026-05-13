@@ -65,6 +65,28 @@ class TD3Algorithm:
     # Critic
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _get_visual_input(obs):
+        return obs["visual_latent"] if "visual_latent" in obs else obs
+
+    @staticmethod
+    def _detach_if_tensor(value):
+        return value.detach() if torch.is_tensor(value) else value
+
+    @staticmethod
+    def _get_robot_state(obs, device, dtype):
+        robot_state = obs.get("robot_state", obs.get("states", None))
+        if robot_state is None:
+            return None
+        return robot_state.to(device, dtype=dtype)
+
+    @staticmethod
+    def _get_ref_action(obs, fallback_action, reshape_action_fn, device, dtype, name):
+        ref_action = obs.get("ref_action", None)
+        if ref_action is None:
+            return fallback_action
+        return reshape_action_fn(ref_action.to(device, dtype=dtype), name)
+
     def compute_critic_loss(
         self,
         policy,
@@ -104,16 +126,21 @@ class TD3Algorithm:
         done_mask = terminations.any(dim=-1, keepdim=True).to(dtype)
 
         with torch.no_grad():
-            curr_visual_feat = build_visual_feat_fn(curr_obs["visual_latent"])
+            curr_visual_feat = build_visual_feat_fn(self._get_visual_input(curr_obs))
+            curr_ref_action = self._get_ref_action(
+                curr_obs,
+                actions,
+                reshape_action_fn,
+                device,
+                dtype,
+                "curr_obs.ref_action",
+            )
             _, curr_actor_aux = model(
                 forward_type=forward_type,
                 mode="actor",
-                visual_feat=curr_visual_feat.detach(),
-                robot_state=curr_obs["robot_state"].to(device, dtype=dtype),
-                ref_action=reshape_action_fn(
-                    curr_obs["ref_action"].to(device, dtype=dtype),
-                    "curr_obs.ref_action",
-                ),
+                visual_feat=self._detach_if_tensor(curr_visual_feat),
+                robot_state=self._get_robot_state(curr_obs, device, dtype),
+                ref_action=curr_ref_action,
                 ref_action_dropout_p=0.0,
                 use_target=False,
             )
@@ -128,14 +155,19 @@ class TD3Algorithm:
             if curr_critic_ref_action is not None:
                 curr_critic_ref_action = curr_critic_ref_action.detach()
 
-            next_visual_feat = build_visual_feat_fn(next_obs["visual_latent"])
+            next_visual_feat = build_visual_feat_fn(self._get_visual_input(next_obs))
+            next_ref_action = self._get_ref_action(
+                next_obs,
+                actions,
+                reshape_action_fn,
+                device,
+                dtype,
+                "next_obs.ref_action",
+            )
             next_actions, next_actor_aux = policy.target_actor_forward(
-                visual_feat=next_visual_feat.detach(),
-                robot_state=next_obs["robot_state"].to(device, dtype=dtype),
-                ref_action=reshape_action_fn(
-                    next_obs["ref_action"].to(device, dtype=dtype),
-                    "next_obs.ref_action",
-                ),
+                visual_feat=self._detach_if_tensor(next_visual_feat),
+                robot_state=self._get_robot_state(next_obs, device, dtype),
+                ref_action=next_ref_action,
             )
             if self.target_policy_noise > 0.0:
                 noise = torch.randn_like(next_actions) * self.target_policy_noise

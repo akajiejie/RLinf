@@ -57,11 +57,14 @@ class FSDPStrategy(FSDPStrategyBase):
         param_dtype = torch_dtype_from_precision(mixed_precision_config.param_dtype)
         reduce_dtype = torch_dtype_from_precision(mixed_precision_config.reduce_dtype)
         buffer_dtype = torch_dtype_from_precision(mixed_precision_config.buffer_dtype)
-        mixed_precision = MixedPrecision(
-            param_dtype=param_dtype,
-            reduce_dtype=reduce_dtype,
-            buffer_dtype=buffer_dtype,
-        )
+        if param_dtype is None and reduce_dtype is None and buffer_dtype is None:
+            mixed_precision = None
+        else:
+            mixed_precision = MixedPrecision(
+                param_dtype=param_dtype,
+                reduce_dtype=reduce_dtype,
+                buffer_dtype=buffer_dtype,
+            )
 
         sharding_strategy = get_sharding_strategy(
             self.cfg.fsdp_config.sharding_strategy
@@ -78,6 +81,12 @@ class FSDPStrategy(FSDPStrategyBase):
             self.cfg.fsdp_config.backward_prefetch
         )
 
+        ignored_modules = [
+            m for m in model.modules()
+            if list(m.parameters(recurse=False))
+            and all(not p.requires_grad for p in m.parameters(recurse=False))
+        ]
+
         fsdp_model = FSDP(
             module=model,
             param_init_fn=init_fn,
@@ -91,6 +100,7 @@ class FSDPStrategy(FSDPStrategyBase):
             backward_prefetch=backward_prefetch,
             limit_all_gathers=self.cfg.fsdp_config.limit_all_gathers,
             use_orig_params=self.cfg.fsdp_config.use_orig_params,
+            ignored_modules=ignored_modules,
         )
         return fsdp_model
 

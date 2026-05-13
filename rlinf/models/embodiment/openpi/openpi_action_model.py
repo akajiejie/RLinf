@@ -488,8 +488,13 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         else:
             processed_obs["observation/state"] = env_obs["states"]
         # wrist image observation
-        if env_obs["wrist_images"] is not None:
-            processed_obs["observation/wrist_image"] = env_obs["wrist_images"]
+        wrist_images = env_obs.get("wrist_images", None)
+        if wrist_images is None:
+            # RealWorldEnv stores non-main cameras as extra views. ALOHA configs
+            # expect the two wrist cameras under observation/wrist_image.
+            wrist_images = env_obs.get("extra_view_images", None)
+        if wrist_images is not None:
+            processed_obs["observation/wrist_image"] = wrist_images
         # extra view image observation
         if env_obs["extra_view_images"] is not None:
             processed_obs["observation/extra_view_image"] = env_obs["extra_view_images"]

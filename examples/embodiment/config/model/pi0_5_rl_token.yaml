@@ -1,40 +1,40 @@
 model_type: "openpi_rl_token"
 
-# Pi05 backbone weights path (frozen during RL training)
 model_path: "/path/to/model/openpi"
-
-# RL token weights path (optional, for loading pre-trained RL token heads)
-# If null, RL token heads are randomly initialized
-rl_token_path: null  # e.g., "/path/to/rl_token_weights.pt"
+rl_token_path: null
 
 precision: null
 
-num_action_chunks: 10
-action_dim: 7
+num_action_chunks: 50
+action_dim: 14
+num_steps: 5
 
 is_lora: False
 lora_rank: 32
-
 use_proprio: True
-num_steps: 5
 add_value_head: False
 
 # RL token autoencoder settings
 rl_token_hidden_dim: 2048
-rl_token_dim: 256
+rl_token_dim: 2048
 rl_token_encoder_layers: 2
 rl_token_decoder_layers: 2
 rl_token_num_heads: 8
-rl_token_max_seq_len: 512
+rl_token_max_seq_len: 768
 rl_token_dropout: 0.1
+# "image_only": only image tokens (num_images * 256) — matches rl_token training
+# "full_prefix": all prefix tokens (image + language)
+prefix_feature_type: "image_only"
+num_image_tokens: 768
+robot_state_dim: 14
 actor_hidden_dims: [512, 256]
 critic_hidden_dims: [512, 256]
 recon_loss_coef: 0.1
 
 openpi:
-  config_name: "pi05_libero"
-  num_images_in_input: 2
-  noise_level: 0.5
+  config_name: "pi05_aloha_robotwin"
+  num_images_in_input: 3
+  noise_level: 0.3
   action_chunk: ${actor.model.num_action_chunks}
   num_steps: ${actor.model.num_steps}
   train_expert_only: True

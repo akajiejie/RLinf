@@ -923,6 +923,7 @@ class EnvWorker(Worker):
             )
             for _ in range(self.stage_num)
         ]
+        pending_transition: list = [None] * self.stage_num  # (curr_obs, next_obs) waiting for next visual_latent
         env_metrics = defaultdict(list)
 
         for epoch in range(self.rollout_epoch):
@@ -1011,9 +1012,22 @@ class EnvWorker(Worker):
                             if env_output.dones.any() and self.cfg.env.train.auto_reset
                             else env_output.obs
                         )
-                        self.rollout_results[stage_id].append_transitions(
-                            curr_obs, next_obs
-                        )
+                        visual_latent = rollout_result.forward_inputs.get("visual_latent", None)
+                        ref_action = rollout_result.forward_inputs.get("ref_action", None)
+                        if visual_latent is not None:
+                            curr_obs["visual_latent"] = visual_latent
+                            if ref_action is not None:
+                                curr_obs["ref_action"] = ref_action
+                            # flush pending transition: fill next_obs with curr step's latents
+                            if pending_transition[stage_id] is not None:
+                                p_curr, p_next = pending_transition[stage_id]
+                                p_next["visual_latent"] = visual_latent
+                                if ref_action is not None:
+                                    p_next["ref_action"] = ref_action
+                                self.rollout_results[stage_id].append_transitions(p_curr, p_next)
+                            pending_transition[stage_id] = (curr_obs, next_obs)
+                        else:
+                            self.rollout_results[stage_id].append_transitions(curr_obs, next_obs)
 
                     env_outputs[stage_id] = env_output
                     self.record_env_metrics(env_metrics, env_info, epoch)

@@ -45,6 +45,19 @@ runner:
 
 algorithm:
   loss_type: embodied_td3
+  sampling_params:
+    do_sample: false
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: false
+
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
   adv_type: null
 
   gamma: 0.99
@@ -92,8 +105,12 @@ env:
       enable_human_intervention: false
       camera_names:
         - cam_high
+        - cam_left_wrist
+        - cam_right_wrist
       img_topics:
         - /camera_f/color/image_raw
+        - /camera_l/color/image_raw
+        - /camera_r/color/image_raw
       obs_img_resolution: [128, 128]
 
   eval:
@@ -108,8 +125,12 @@ env:
       enable_human_intervention: false
       camera_names:
         - cam_high
+        - cam_left_wrist
+        - cam_right_wrist
       img_topics:
         - /camera_f/color/image_raw
+        - /camera_l/color/image_raw
+        - /camera_r/color/image_raw
       obs_img_resolution: [128, 128]
 
 rollout:
@@ -133,15 +154,15 @@ actor:
   enable_offload: false
 
   model:
-    model_path: "/shared_disk/users/weijie.ke/experiments/vla/pi05/openpi_torch/pi05_plug_cable"  # placeholder — not loaded in dummy mode if rl_token_path is null
-    rl_token_path: "/shared_disk/users/weijie.ke/openpi_RLT/openpi/checkpoints/rl_token/pi05_plug_cable/rl_token_pi05_image/10000"           # random init for RL token heads
+    model_path: "/home/focal/shared_disk/users/kwj/weight/openpi/pi05_plug_cable"  # placeholder — not loaded in dummy mode if rl_token_path is null
+    rl_token_path: "/home/focal/shared_disk/users/kwj/weight/rltoken/rltoken/rl_token_pi05_image/10000"           # random init for RL token heads
     action_dim: 14
-    action_horizon: 5
-    num_action_chunks: 5
+    action_horizon: 50
+    num_action_chunks: 50
     num_steps: 5
     openpi:
       config_name: "pi05_aloha_robotwin"
-      num_images_in_input: 1
+      num_images_in_input: 3
       noise_level: 0.3
       train_expert_only: True
 
@@ -171,6 +192,7 @@ actor:
     lr_scheduler: torch_constant
 
   fsdp_config:
+    use_orig_params: True
     strategy: "fsdp"
     gradient_checkpointing: False
     mixed_precision:

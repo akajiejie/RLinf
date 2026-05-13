@@ -31,6 +31,7 @@ def get_model(cfg: DictConfig, torch_dtype=None):
             rl_token_num_heads=rl_config_from_ckpt["num_heads"],
             rl_token_max_seq_len=rl_config_from_ckpt["max_seq_len"],
             rl_token_dropout=rl_config_from_ckpt.get("dropout", 0.1),
+            robot_state_dim=cfg.get("robot_state_dim", 14),
             actor_hidden_dims=tuple(cfg.get("actor_hidden_dims", [512, 256])),
             critic_hidden_dims=tuple(cfg.get("critic_hidden_dims", [512, 256])),
             action_horizon=cfg.get("action_horizon", cfg.get("num_action_chunks", 10)),
@@ -46,6 +47,9 @@ def get_model(cfg: DictConfig, torch_dtype=None):
             rl_token_num_heads=cfg.get("rl_token_num_heads", 8),
             rl_token_max_seq_len=cfg.get("rl_token_max_seq_len", 768),
             rl_token_dropout=cfg.get("rl_token_dropout", 0.1),
+            num_image_tokens=cfg.get("num_image_tokens", 768),
+            prefix_feature_type=cfg.get("prefix_feature_type", "image_only"),
+            robot_state_dim=cfg.get("robot_state_dim", 14),
             actor_hidden_dims=tuple(cfg.get("actor_hidden_dims", [512, 256])),
             critic_hidden_dims=tuple(cfg.get("critic_hidden_dims", [512, 256])),
             action_horizon=cfg.get("action_horizon", cfg.get("num_action_chunks", 10)),
@@ -68,6 +72,11 @@ def get_model(cfg: DictConfig, torch_dtype=None):
                 images, img_masks, lang_tokens, lang_masks
             )
             return prefix_output, prefix_pad_masks, past_key_values
+
+        def _get_vla_ref_action(self, obs):
+            """Run VLA flow matching to get reference action ã = πvla(s)."""
+            actions, result = self.backbone.predict_action_batch(obs, mode="eval", compute_values=False)
+            return actions
 
     model = OpenPiRLTokenPolicyWithBackbone(rl_cfg)
     model.backbone = backbone

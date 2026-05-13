@@ -33,6 +33,11 @@ class OpenPiRLTokenConfig:
     rl_token_num_heads: int = 8
     rl_token_max_seq_len: int = 512
     rl_token_dropout: float = 0.1
+    num_image_tokens: int = 768  # image-only tokens passed to rl_token encoder (num_images * 256)
+    # "full_prefix": use all prefix tokens (image + language)
+    # "image_only": use only the first num_image_tokens (image tokens)
+    prefix_feature_type: str = "image_only"
+    robot_state_dim: int = 14  # proprioception dimension (s_p)
     actor_hidden_dims: tuple = (512, 256)
     critic_hidden_dims: tuple = (512, 256)
     action_horizon: int = 5
@@ -63,14 +68,16 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
         )
 
         self.rl_token_autoencoder = RLTokenAutoencoder(rl_cfg)
+        ref_action_dim = config.action_horizon * config.action_dim
+        actor_input_dim = config.rl_token_dim + config.robot_state_dim + ref_action_dim
         self.actor_head = ValueHead(
-            input_dim=config.rl_token_dim,
+            input_dim=actor_input_dim,
             hidden_sizes=config.actor_hidden_dims,
             output_dim=config.action_horizon * config.action_dim,
             activation="relu",
             bias_last=True,
         )
-        critic_input_dim = config.rl_token_dim + config.action_horizon * config.action_dim
+        critic_input_dim = actor_input_dim + ref_action_dim  # x + a_{1:C}
         self.critic_head_1 = ValueHead(
             input_dim=critic_input_dim,
             hidden_sizes=config.critic_hidden_dims,
@@ -104,11 +111,41 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
     def default_forward(self, **kwargs):
         return self.predict_action_batch(**kwargs)
 
-    def predict_action_batch(self, obs, **kwargs):
-        """Rollout inference: encode prefix → actor head → actions."""
+    def predict_action_batch(self, env_obs=None, obs=None, **kwargs):
+        """Rollout inference: encode prefix → actor head → actions.
+
+        Rollout workers call policies with ``env_obs=...``. Keep ``obs`` as a
+        compatibility alias for direct tests and older call sites.
+        """
+        obs = env_obs if env_obs is not None else obs
+        if obs is None:
+            raise ValueError("predict_action_batch requires `env_obs` or `obs`.")
         prefix_output, _, _ = self._build_prefix_cache_from_obs(obs)
-        rl_token = self.rl_token_autoencoder.encoder(prefix_output)
-        return self._decode_action(rl_token, use_target=False)
+        image_features = self._select_prefix_features(prefix_output)
+        rl_token = self.rl_token_autoencoder.encoder(image_features)
+        robot_state = obs.get("states", obs.get("robot_state", None))
+        if robot_state is not None and not isinstance(robot_state, torch.Tensor):
+            robot_state = torch.tensor(robot_state, dtype=torch.float32)
+        # Get VLA reference action ã = πvla(s) for actor conditioning and BC loss
+        ref_action = self._get_vla_ref_action(obs) if hasattr(self, "_get_vla_ref_action") else None
+        if ref_action is None:
+            ref_action_dim = self.config.action_horizon * self.config.action_dim
+            ref_action = torch.zeros(rl_token.shape[0], ref_action_dim, device=rl_token.device, dtype=rl_token.dtype)
+        x = self._build_x(rl_token, robot_state, ref_action)
+        actions = self._decode_action(x, use_target=False)
+        flat_actions = actions.reshape(actions.shape[0], -1)
+        zero_scores = actions.new_zeros(*actions.shape[:2], 1)
+        result = {
+            "prev_logprobs": zero_scores,
+            "prev_values": zero_scores,
+            "forward_inputs": {
+                "action": flat_actions,
+                "model_action": flat_actions,
+                "visual_latent": image_features.cpu(),
+                "ref_action": ref_action.reshape(ref_action.shape[0], -1).cpu(),
+            },
+        }
+        return actions, result
 
     # ------------------------------------------------------------------
     # TD3 interface (called by TD3Algorithm via BasePolicy.forward)
@@ -134,9 +171,10 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
 
     def target_actor_forward(self, visual_feat, robot_state, ref_action, **kwargs):
         prefix_output = self._extract_prefix_from_visual_feat(visual_feat)
-        rl_token = self.target_rl_token_autoencoder.encoder(prefix_output)
-        actions = self._decode_action(rl_token, use_target=True)
-        return actions, {"rl_state": rl_token}
+        rl_token = self.target_rl_token_autoencoder.encoder(self._select_prefix_features(prefix_output))
+        x = self._build_x(rl_token, robot_state, ref_action)
+        actions = self._decode_action(x, use_target=True)
+        return actions, {"rl_state": x, "rl_token": rl_token}
 
     def target_critic_forward(self, rl_state: Tensor, action: Tensor, **kwargs):
         return self._compute_q(rl_state, action, use_target=True)
@@ -146,8 +184,6 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
     # ------------------------------------------------------------------
 
     def compute_recon_loss(self, prefix_output: Tensor, rl_token: Tensor) -> Tensor:
-        _, recon = self.rl_token_autoencoder.decoder(rl_token, prefix_output), None
-        # Use autoencoder forward to get recon (encoder already ran, reuse token)
         recon = self.rl_token_autoencoder.decoder(rl_token, prefix_output)
         return reconstruction_loss(prefix_output, recon)
 
@@ -183,16 +219,21 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
         ref_action: Tensor,
         ref_action_dropout_p: float = 0.0,
         use_target: bool = False,
+        compute_recon_loss: bool = False,
         **kwargs,
     ):
         prefix_output = self._extract_prefix_from_visual_feat(visual_feat)
+        features = self._select_prefix_features(prefix_output)
         encoder = (
             self.target_rl_token_autoencoder.encoder if use_target
             else self.rl_token_autoencoder.encoder
         )
-        rl_token = encoder(prefix_output)
-        actions = self._decode_action(rl_token, use_target=use_target)
-        aux = {"rl_state": rl_token, "prefix_output": prefix_output}
+        rl_token = encoder(features)
+        x = self._build_x(rl_token, robot_state, ref_action)
+        actions = self._decode_action(x, use_target=use_target)
+        aux = {"rl_state": x, "rl_token": rl_token, "prefix_output": features}
+        if compute_recon_loss:
+            aux["recon_loss"] = self.compute_recon_loss(features, rl_token)
         return actions, aux
 
     def _td3_critic_forward(
@@ -204,9 +245,9 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
     ):
         return self._compute_q(rl_state, action, use_target=use_target)
 
-    def _decode_action(self, rl_token: Tensor, use_target: bool) -> Tensor:
+    def _decode_action(self, x: Tensor, use_target: bool) -> Tensor:
         head = self.target_actor_head if use_target else self.actor_head
-        flat = head(rl_token)
+        flat = head(x)
         return flat.reshape(flat.shape[0], self.config.action_horizon, self.config.action_dim)
 
     def _compute_q(self, rl_state: Tensor, action: Tensor, use_target: bool):
@@ -220,6 +261,19 @@ class OpenPiRLTokenPolicy(torch.nn.Module, BasePolicy):
             q1 = self.critic_head_1(critic_input)
             q2 = self.critic_head_2(critic_input)
         return q1, q2
+
+    def _build_x(self, rl_token: Tensor, robot_state: Tensor | None, ref_action: Tensor | None) -> Tensor:
+        parts = [rl_token]
+        if robot_state is not None:
+            parts.append(robot_state.to(device=rl_token.device, dtype=rl_token.dtype).reshape(rl_token.shape[0], -1))
+        if ref_action is not None:
+            parts.append(ref_action.to(device=rl_token.device, dtype=rl_token.dtype).reshape(rl_token.shape[0], -1))
+        return torch.cat(parts, dim=-1)
+
+    def _select_prefix_features(self, prefix_output: Tensor) -> Tensor:
+        if self.config.prefix_feature_type == "image_only":
+            return prefix_output[:, : self.config.num_image_tokens, :]
+        return prefix_output  # "full_prefix"
 
     def _extract_prefix_from_visual_feat(self, visual_feat) -> Tensor:
         """Extract prefix tokens from visual_feat.
